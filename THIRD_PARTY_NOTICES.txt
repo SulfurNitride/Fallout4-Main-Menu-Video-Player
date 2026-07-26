@@ -1,0 +1,17 @@
+Main Menu Video Player third-party notices
+==========================================
+
+This project uses the following open-source libraries:
+
+- FFmpeg 4.4.3 (LGPL-2.1-or-later), https://ffmpeg.org/
+- libaom (BSD-2-Clause), https://aomedia.googlesource.com/aom/
+- MinHook (BSD-2-Clause), https://github.com/TsudaKageyu/minhook
+- spdlog (MIT), https://github.com/gabime/spdlog
+- fmt (MIT), https://github.com/fmtlib/fmt
+
+The black MainMenuLoop carrier was encoded with the RAD Video Tools for this
+noncommercial Fallout 4 mod. Bink Video is a trademark of Epic Games Tools
+(formerly RAD Game Tools). The encoder is not redistributed with this mod.
+
+The project's source and build scripts provide the material needed to rebuild
+and relink the plugin with compatible versions of its open-source libraries.

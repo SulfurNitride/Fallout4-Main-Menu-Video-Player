@@ -1,0 +1,42 @@
+{
+  "name": "ffmpeg",
+  "version": "4.4.3",
+  "port-version": 1,
+  "description": "FFmpeg multimedia libraries (Linux-host cross-build overlay).",
+  "homepage": "https://ffmpeg.org",
+  "dependencies": [
+    {
+      "name": "vcpkg-cmake-get-vars",
+      "host": true
+    },
+    {
+      "name": "vcpkg-pkgconfig-get-modules",
+      "host": true
+    }
+  ],
+  "features": {
+    "avcodec": {
+      "description": "Build libavcodec"
+    },
+    "avformat": {
+      "description": "Build libavformat",
+      "dependencies": [
+        {
+          "name": "ffmpeg",
+          "default-features": false,
+          "features": ["avcodec"]
+        }
+      ]
+    },
+    "aom": {
+      "description": "AV1 decoding via libaom",
+      "dependencies": ["aom"]
+    },
+    "swscale": {
+      "description": "Build libswscale"
+    },
+    "swresample": {
+      "description": "Build libswresample"
+    }
+  }
+}

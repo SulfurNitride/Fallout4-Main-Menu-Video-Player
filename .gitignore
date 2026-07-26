@@ -1,0 +1,21 @@
+/build/
+/dist/
+/reference-*/
+/extern/CommonLibF4/
+/tools/rad-video-tools/
+/.cache/
+/.vs/
+/.vscode/
+/CMakePresets.json
+/out/
+*.suo
+*.user
+*.VC.db
+
+# Local Linux-to-Windows cross-build environment. The supported public build
+# is the native Windows workflow in .github/workflows/build.yml.
+/Containerfile
+/scripts/
+/cmake/tool-wrappers/
+/cmake/windows-msvc-clang.cmake
+/cmake/triplets/x64-windows-clang-linux.cmake

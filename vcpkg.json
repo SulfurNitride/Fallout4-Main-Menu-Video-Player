@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "main-menu-video-player",
+  "version-string": "0.1.0",
+  "supports": "windows & x64",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["aom", "avcodec", "avformat", "swresample", "swscale"]
+    },
+    "minhook",
+    {
+      "name": "spdlog",
+      "features": ["wchar"]
+    }
+  ]
+}

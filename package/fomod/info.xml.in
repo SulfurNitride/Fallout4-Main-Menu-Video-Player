@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<fomod>
+  <Name>Main Menu Video Player</Name>
+  <Author>SulfurNitride</Author>
+  <Version>@PROJECT_VERSION@</Version>
+  <Website>https://github.com/SulfurNitride/Fallout4-Main-Menu-Video-Player</Website>
+  <Description>Play a random ordinary video behind Fallout 4's main-menu controls.</Description>
+</fomod>

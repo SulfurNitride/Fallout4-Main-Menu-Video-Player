@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="https://qconsulting.ca/fo3/ModConfig5.0.xsd">
+  <moduleName>Main Menu Video Player</moduleName>
+  <requiredInstallFiles>
+    <folder source="common" destination="" priority="0" />
+  </requiredInstallFiles>
+  <installSteps order="Explicit">
+    <installStep name="Choose your Fallout 4 runtime">
+      <optionalFileGroups order="Explicit">
+        <group name="Plugin version" type="SelectExactlyOne">
+          <plugins order="Explicit">
+            <plugin name="OG — Fallout 4 1.10.163">
+              <description>For the pre-next-gen Fallout 4 executable version 1.10.163.</description>
+              <files>
+                <folder source="runtime/OG" destination="" priority="0" />
+              </files>
+              <typeDescriptor>
+                <type name="Optional" />
+              </typeDescriptor>
+            </plugin>
+            <plugin name="NG — Fallout 4 1.10.980 or 1.10.984">
+              <description>For the 2024 next-gen Fallout 4 executable versions 1.10.980 and 1.10.984.</description>
+              <files>
+                <folder source="runtime/NG" destination="" priority="0" />
+              </files>
+              <typeDescriptor>
+                <type name="Optional" />
+              </typeDescriptor>
+            </plugin>
+            <plugin name="AE — Fallout 4 1.11.x">
+              <description>For Fallout 4 executable versions 1.11.137, 1.11.159, 1.11.169, 1.11.191, and 1.11.221.</description>
+              <files>
+                <folder source="runtime/AE" destination="" priority="0" />
+              </files>
+              <typeDescriptor>
+                <type name="Optional" />
+              </typeDescriptor>
+            </plugin>
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+  </installSteps>
+</config>
