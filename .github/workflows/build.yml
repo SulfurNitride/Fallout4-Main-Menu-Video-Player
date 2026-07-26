@@ -50,6 +50,18 @@ jobs:
         run: |
           git clone https://github.com/microsoft/vcpkg.git vcpkg
           git -C vcpkg checkout $env:VCPKG_COMMIT
+
+          # vcpkg 2022 pins 7-Zip 21.07, but its original 7-zip.org URL
+          # now returns 404. The official GitHub release has the exact
+          # SHA-512 already recorded by this vcpkg revision.
+          $toolsFile = "vcpkg\scripts\vcpkgTools.xml"
+          $toolsXml = Get-Content $toolsFile -Raw
+          $toolsXml = $toolsXml.Replace(
+            "https://www.7-zip.org/a/7z2107-extra.7z",
+            "https://github.com/ip7z/7zip/releases/download/21.07/7z2107-extra.7z"
+          )
+          Set-Content -Path $toolsFile -Value $toolsXml -NoNewline
+
           .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Restore vcpkg binary cache
