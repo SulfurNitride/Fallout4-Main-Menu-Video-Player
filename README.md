@@ -5,6 +5,8 @@ random ordinary video while keeping the Scaleform menu and console in front.
 It supports video audio, loops the selected file, and avoids selecting the
 same file twice in a row when more than one video is available.
 
+Yes and like always Codex helped me make this, as it does with most of my content.
+
 ## Requirements and supported runtimes
 
 - Fallout 4 Script Extender (F4SE) matching the installed game.
