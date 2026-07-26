@@ -1,14 +1,9 @@
 # Main Menu Video Player
 
-[![Build](https://github.com/SulfurNitride/Fallout4-Main-Menu-Video-Player/actions/workflows/build.yml/badge.svg)](https://github.com/SulfurNitride/Fallout4-Main-Menu-Video-Player/actions/workflows/build.yml)
-
 Main Menu Video Player replaces Fallout 4's native main-menu movie with a
 random ordinary video while keeping the Scaleform menu and console in front.
 It supports video audio, loops the selected file, and avoids selecting the
 same file twice in a row when more than one video is available.
-
-Playback continues after alt-tab in borderless fullscreen. In windowed or
-exclusive-fullscreen modes, playback pauses while Fallout is unfocused.
 
 ## Requirements and supported runtimes
 
@@ -38,12 +33,10 @@ For a manual installation, copy everything under `common` to Fallout 4's
 `Data` directory, then copy the matching runtime folder there as well.
 
 The plugin enables Fallout's native main-menu Bink layer and disables the
-vanilla main-menu music in memory before the menu initializes. It does not
-rewrite the user's Fallout INIs. The included MO2 INI tweak is a fallback for
-mod-manager configurations that apply it.
+vanilla main-menu music in memory before the menu initializes.
 
 The included `MainMenuLoop.bk2` is a silent, black, 3840x2160, 60 fps,
-five-second carrier. Fallout loops this carrier transparently while the
+five-second video. Fallout loops this video transparently while the
 selected ordinary video continues. The plugin replaces its decoded pixels
 with the selected video, leaving the menu controls above it.
 
@@ -68,35 +61,3 @@ loops until that session closes.
 
 The log is written to
 `Data/F4SE/Plugins/MainMenuVideoPlayer.log`.
-
-## Troubleshooting
-
-If the screen remains black, confirm that a supported video exists directly
-inside `Data/MainMenuVideos` and inspect the log for the selected filename or
-decoder error.
-
-If the vanilla movie appears, make sure this mod wins the
-`Video/MainMenuLoop.bk2` conflict.
-
-If both the vanilla music and video audio play, leave
-`MuteVanillaMenuMusic=1` in the plugin INI and confirm that the matching DLL
-was selected in the FOMOD.
-
-## Building
-
-The supported build environment is Visual Studio 2022 on Windows. The
-repository pins the vcpkg revision used for dependency resolution in
-`.github/workflows/build.yml`; the workflow builds all three runtime DLLs,
-assembles the FOMOD, validates its structure, and uploads the ZIP as an
-artifact. A tag matching `v*` also publishes the ZIP to a GitHub release.
-
-To reproduce the workflow locally, follow the configure and build commands in
-the workflow using the same vcpkg commit and the
-`x64-windows-static-md` triplet.
-
-## License
-
-Project source is available under the [MIT License](LICENSE). The distributed
-DLL statically incorporates third-party libraries under their respective
-licenses; see [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) and
-[`licenses`](licenses).
