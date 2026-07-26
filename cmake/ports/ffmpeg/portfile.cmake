@@ -5,7 +5,7 @@ set(_upstream_port "${VCPKG_ROOT_DIR}/ports/ffmpeg")
 file(READ "${_upstream_port}/portfile.cmake" _portfile)
 string(REPLACE
     "if(VCPKG_TARGET_IS_WINDOWS)\n    vcpkg_acquire_msys(MSYS_ROOT)\n    set(SHELL \"\${MSYS_ROOT}/usr/bin/bash.exe\")\nelse()\n    set(SHELL /bin/sh)\nendif()"
-    "if(VCPKG_HOST_IS_LINUX)\n    set(SHELL /bin/bash)\nelseif(DEFINED ENV{MMVP_MSYS2_ROOT})\n    file(TO_CMAKE_PATH \"$ENV{MMVP_MSYS2_ROOT}\" MMVP_MSYS2_ROOT)\n    set(SHELL \"\${MMVP_MSYS2_ROOT}/usr/bin/bash.exe\")\nelseif(VCPKG_TARGET_IS_WINDOWS)\n    vcpkg_acquire_msys(MSYS_ROOT)\n    set(SHELL \"\${MSYS_ROOT}/usr/bin/bash.exe\")\nelse()\n    set(SHELL /bin/sh)\nendif()"
+    "if(VCPKG_HOST_IS_LINUX)\n    set(SHELL /bin/bash)\nelseif(DEFINED ENV{MMVP_MSYS2_ROOT})\n    file(TO_CMAKE_PATH \"\$ENV{MMVP_MSYS2_ROOT}\" MMVP_MSYS2_ROOT)\n    set(SHELL \"\${MMVP_MSYS2_ROOT}/usr/bin/bash.exe\")\nelseif(VCPKG_TARGET_IS_WINDOWS)\n    vcpkg_acquire_msys(MSYS_ROOT)\n    set(SHELL \"\${MSYS_ROOT}/usr/bin/bash.exe\")\nelse()\n    set(SHELL /bin/sh)\nendif()"
     _portfile
     "${_portfile}"
 )
