@@ -32,6 +32,7 @@ jobs:
           install: >-
             diffutils
             make
+            mingw-w64-x86_64-pkgconf
             nasm
             perl
             pkgconf
@@ -41,7 +42,7 @@ jobs:
         shell: pwsh
         run: |
           $msysRoot = "${{ steps.msys2.outputs.msys2-location }}"
-          $pkgConfig = Join-Path $msysRoot "usr\bin\pkg-config.exe"
+          $pkgConfig = Join-Path $msysRoot "mingw64\bin\pkg-config.exe"
           if (-not (Test-Path $pkgConfig -PathType Leaf)) {
             throw "MSYS2 pkg-config was not installed at $pkgConfig"
           }
@@ -136,3 +137,10 @@ jobs:
           name: MainMenuVideoPlayer-FOMOD
           path: build/windows-ci/MainMenuVideoPlayer-*-FOMOD.zip
           if-no-files-found: error
+
+      - name: Save vcpkg binary cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg-binary-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/x64-windows-static-md.cmake') }}
