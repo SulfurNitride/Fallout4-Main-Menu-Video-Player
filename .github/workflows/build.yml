@@ -42,7 +42,15 @@ jobs:
       - name: Export MSYS2 location
         shell: pwsh
         run: |
-          "MMVP_MSYS2_ROOT=${{ steps.msys2.outputs.msys2-location }}" |
+          $msysRoot = "${{ steps.msys2.outputs.msys2-location }}"
+          $pkgConfig = Join-Path $msysRoot "usr\bin\pkg-config.exe"
+          if (-not (Test-Path $pkgConfig -PathType Leaf)) {
+            throw "MSYS2 pkg-config was not installed at $pkgConfig"
+          }
+
+          "MMVP_MSYS2_ROOT=$msysRoot" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG=$pkgConfig" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Check out pinned vcpkg
