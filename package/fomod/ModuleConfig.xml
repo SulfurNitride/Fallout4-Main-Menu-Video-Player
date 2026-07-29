@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="https://qconsulting.ca/fo3/ModConfig5.0.xsd">
-  <moduleName>Main Menu Video Player</moduleName>
+  <moduleName>Main Menu Video Player and World Screens</moduleName>
   <requiredInstallFiles>
     <folder source="common" destination="" priority="0" />
   </requiredInstallFiles>

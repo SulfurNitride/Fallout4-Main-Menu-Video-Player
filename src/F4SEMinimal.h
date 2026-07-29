@@ -53,6 +53,9 @@ namespace F4SEMinimal
     };
 
     inline constexpr std::uint32_t kInterfaceMessaging{ 1 };
+    inline constexpr std::uint32_t kInterfaceScaleform{ 2 };
+    inline constexpr std::uint32_t kInterfacePapyrus{ 3 };
+    inline constexpr std::uint32_t kInterfaceSerialization{ 4 };
     inline constexpr std::uint32_t kMessageInputLoaded{ 7 };
 
     struct Message
@@ -79,6 +82,54 @@ namespace F4SEMinimal
             std::uint32_t,
             const char*);
         void* (*GetEventDispatcher)(std::uint32_t);
+    };
+
+    struct PapyrusInterface
+    {
+        static constexpr std::uint32_t kVersion{ 2 };
+
+        std::uint32_t interfaceVersion;
+        bool (*Register)(void*);
+        void (*GetExternalEventRegistrations)(
+            const char*,
+            void*,
+            void*);
+    };
+
+    struct ScaleformInterface
+    {
+        static constexpr std::uint32_t kVersion{ 1 };
+
+        using RegisterCallback = bool (*)(void*, void*);
+
+        std::uint32_t interfaceVersion;
+        bool (*Register)(const char*, RegisterCallback);
+    };
+
+    struct SerializationInterface
+    {
+        static constexpr std::uint32_t kVersion{ 1 };
+
+        std::uint32_t interfaceVersion;
+        void (*SetUniqueID)(std::uint32_t, std::uint32_t);
+        void (*SetRevertCallback)(std::uint32_t, void*);
+        void (*SetSaveCallback)(std::uint32_t, void*);
+        void (*SetLoadCallback)(std::uint32_t, void*);
+        void (*SetFormDeleteCallback)(std::uint32_t, void*);
+        bool (*WriteRecord)(
+            std::uint32_t,
+            std::uint32_t,
+            const void*,
+            std::uint32_t);
+        bool (*OpenRecord)(std::uint32_t, std::uint32_t);
+        bool (*WriteRecordData)(const void*, std::uint32_t);
+        bool (*GetNextRecordInfo)(
+            std::uint32_t*,
+            std::uint32_t*,
+            std::uint32_t*);
+        std::uint32_t (*ReadRecordData)(void*, std::uint32_t);
+        bool (*ResolveHandle)(std::uint64_t, std::uint64_t*);
+        bool (*ResolveFormID)(std::uint32_t, std::uint32_t*);
     };
 
     struct PluginInfo

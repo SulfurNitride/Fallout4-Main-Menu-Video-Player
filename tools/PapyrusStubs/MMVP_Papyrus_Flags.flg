@@ -1,0 +1,6 @@
+Flag Hidden 0 { Script }
+Flag Conditional 1
+Flag Mandatory 2 { Property }
+Flag Const 3
+Flag BetaOnly 4 { Function }
+Flag DebugOnly 5 { Function }

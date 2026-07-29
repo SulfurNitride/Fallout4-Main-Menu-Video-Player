@@ -1,6 +1,6 @@
 #include <cstdio>
-#include <cstdlib>
-#include <cwchar>
+
+#include "SmokePath.h"
 
 extern "C"
 {
@@ -15,8 +15,8 @@ int wmain(int argc, wchar_t** argv)
         return 2;
     }
 
-    char path[32768]{};
-    if (::wcstombs(path, argv[1], sizeof(path) - 1) == static_cast<std::size_t>(-1)) {
+    const std::string path = WidePathToUtf8(argv[1]);
+    if (path.empty()) {
         ::fwprintf(stderr, L"could not convert video path\n");
         return 3;
     }
@@ -24,7 +24,7 @@ int wmain(int argc, wchar_t** argv)
     std::puts("stage=open");
     std::fflush(stdout);
     AVFormatContext* format = nullptr;
-    int result = avformat_open_input(&format, path, nullptr, nullptr);
+    int result = avformat_open_input(&format, path.c_str(), nullptr, nullptr);
     if (result < 0) {
         std::printf("open failed: %d\n", result);
         return 4;

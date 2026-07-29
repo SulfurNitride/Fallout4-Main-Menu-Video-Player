@@ -3,6 +3,7 @@
 #include "AudioOutput.h"
 #include "Config.h"
 #include "EngineSettings.h"
+#include "MediaLibrary.h"
 #include "VideoPlayer.h"
 
 extern "C"
@@ -17,13 +18,6 @@ extern "C"
 
 namespace
 {
-    constexpr std::array kVideoExtensions{
-        ".3g2"sv,  ".3gp"sv, ".asf"sv,  ".avi"sv, ".f4v"sv,
-        ".flv"sv,  ".m4v"sv, ".mkv"sv,  ".mov"sv, ".mp4"sv,
-        ".mpeg"sv, ".mpg"sv, ".ogv"sv,  ".qt"sv,  ".vob"sv,
-        ".webm"sv, ".wmv"sv
-    };
-
     std::string Utf8Path(const std::filesystem::path& path)
     {
         const auto utf8 = path.u8string();
@@ -31,14 +25,6 @@ namespace
             reinterpret_cast<const char*>(utf8.data()),
             utf8.size()
         };
-    }
-
-    std::string Lowercase(std::string value)
-    {
-        std::ranges::transform(value, value.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
-        return value;
     }
 
     std::string AvError(const int code)
@@ -259,19 +245,31 @@ VideoPlayer::VideoPlayer() :
     random_(std::random_device{}()),
     worker_([this](std::stop_token stopToken) {
         Worker(stopToken);
+    }),
+    sidecarWorker_([this](std::stop_token stopToken) {
+        SidecarWorker(stopToken);
     })
-{}
+{
+    volume_.store(Config::MainMenuVolume(), std::memory_order_release);
+}
 
 VideoPlayer::~VideoPlayer()
 {
     worker_.request_stop();
+    sidecarWorker_.request_stop();
     wakeCondition_.notify_all();
+    sidecarCondition_.notify_all();
 }
 
 void VideoPlayer::OnNativeVideoOpened(
     const std::uint32_t width,
-    const std::uint32_t height)
+    const std::uint32_t height,
+    std::optional<std::filesystem::path> selectedVideo)
 {
+    {
+        std::scoped_lock lock(wakeMutex_);
+        selectedVideo_ = std::move(selectedVideo);
+    }
     outputWidth_.store(width, std::memory_order_release);
     outputHeight_.store(height, std::memory_order_release);
     nativeVideoActive_.store(true, std::memory_order_release);
@@ -281,11 +279,55 @@ void VideoPlayer::OnNativeVideoOpened(
 
 void VideoPlayer::OnNativeVideoClosed()
 {
+    {
+        std::scoped_lock lock(wakeMutex_);
+        selectedVideo_.reset();
+    }
     nativeVideoActive_.store(false, std::memory_order_release);
     outputWidth_.store(0, std::memory_order_release);
     outputHeight_.store(0, std::memory_order_release);
     session_.fetch_add(1, std::memory_order_release);
     wakeCondition_.notify_all();
+}
+
+void VideoPlayer::StartSidecarAudio(
+    const std::filesystem::path& path)
+{
+    {
+        std::scoped_lock lock(sidecarMutex_);
+        sidecarPath_ = path;
+    }
+    sidecarActive_.store(true, std::memory_order_release);
+    sidecarSession_.fetch_add(1, std::memory_order_release);
+    sidecarCondition_.notify_all();
+}
+
+void VideoPlayer::StopSidecarAudio()
+{
+    {
+        std::scoped_lock lock(sidecarMutex_);
+        sidecarPath_.reset();
+    }
+    sidecarActive_.store(false, std::memory_order_release);
+    sidecarSession_.fetch_add(1, std::memory_order_release);
+    sidecarCondition_.notify_all();
+}
+
+void VideoPlayer::AdjustVolume(const float delta)
+{
+    float current = volume_.load(std::memory_order_acquire);
+    while (!volume_.compare_exchange_weak(
+        current,
+        std::clamp(current + delta, 0.0F, 2.0F),
+        std::memory_order_acq_rel)) {}
+    spdlog::info(
+        "Main-menu audio volume set to {:.0f}%",
+        Volume() * 100.0F);
+}
+
+float VideoPlayer::Volume() const noexcept
+{
+    return volume_.load(std::memory_order_acquire);
 }
 
 std::shared_ptr<const VideoFrame> VideoPlayer::GetLatestFrame() const
@@ -316,63 +358,54 @@ void VideoPlayer::Worker(std::stop_token stopToken)
             continue;
         }
 
-        auto videos = FindVideos();
-        if (videos.empty()) {
-            spdlog::error(
-                "No supported videos found in Data\\MainMenuVideos");
-            continue;
+        std::optional<std::filesystem::path> selected;
+        {
+            std::scoped_lock lock(wakeMutex_);
+            selected = std::move(selectedVideo_);
+            selectedVideo_.reset();
         }
-
-        const auto selected = PickVideo(std::move(videos));
+        if (!selected) {
+            auto videos = FindVideos();
+            if (videos.empty()) {
+                spdlog::error(
+                    "No supported videos found in Data\\MainMenuVideos");
+                continue;
+            }
+            selected = PickVideo(std::move(videos));
+        }
         spdlog::info(
             "Main-menu session {} selected video: {}",
             handledSession,
-            Utf8Path(selected));
-        DecodeSession(selected, handledSession, stopToken);
+            Utf8Path(*selected));
+        DecodeSession(*selected, handledSession, stopToken);
         latestFrame_.store({}, std::memory_order_release);
     }
 }
 
 std::vector<std::filesystem::path> VideoPlayer::FindVideos() const
 {
-    const std::filesystem::path directory{ "Data/MainMenuVideos" };
-    std::vector<std::filesystem::path> videos;
-    std::error_code error;
-
-    if (!std::filesystem::is_directory(directory, error)) {
-        spdlog::error(
-            "Video directory is unavailable: {} ({})",
-            Utf8Path(directory),
-            error.message());
-        return videos;
-    }
-
-    for (std::filesystem::directory_iterator iterator(directory, error), end;
-         !error && iterator != end;
-         iterator.increment(error)) {
-        const auto& entry = *iterator;
-        if (!entry.is_regular_file(error) || error) {
-            error.clear();
-            continue;
+    const auto directory = Config::MainMenuDirectory();
+    const MediaLibrary library(
+        directory,
+        Config::RecursiveMediaScan());
+    auto videos = library.Scan();
+    if (videos.empty() &&
+        directory != std::filesystem::path("Data/MainMenuVideos")) {
+        const MediaLibrary legacyLibrary(
+            "Data/MainMenuVideos",
+            Config::RecursiveMediaScan());
+        videos = legacyLibrary.Scan();
+        if (!videos.empty()) {
+            spdlog::info(
+                "Using legacy Data\\MainMenuVideos directory for "
+                "backward compatibility");
         }
-
-        const std::string extension =
-            Lowercase(entry.path().extension().string());
-        if (std::ranges::find(kVideoExtensions, extension) !=
-            kVideoExtensions.end()) {
-            videos.push_back(entry.path());
-        }
-    }
-
-    if (error) {
-        spdlog::warn(
-            "Video directory scan ended early: {}",
-            error.message());
     }
     spdlog::info(
-        "Discovered {} video{} in Data\\MainMenuVideos",
+        "Discovered {} main-menu video{} in {}",
         videos.size(),
-        videos.size() == 1 ? "" : "s");
+        videos.size() == 1 ? "" : "s",
+        Utf8Path(directory));
     return videos;
 }
 
@@ -393,21 +426,75 @@ bool VideoPlayer::SessionActive(const std::uint64_t session) const
            session_.load(std::memory_order_acquire) == session;
 }
 
+bool VideoPlayer::SidecarSessionActive(
+    const std::uint64_t session) const
+{
+    return sidecarActive_.load(std::memory_order_acquire) &&
+           sidecarSession_.load(std::memory_order_acquire) == session;
+}
+
+void VideoPlayer::SidecarWorker(std::stop_token stopToken)
+{
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    std::uint64_t handledSession = 0;
+
+    while (!stopToken.stop_requested()) {
+        {
+            std::unique_lock lock(sidecarMutex_);
+            sidecarCondition_.wait(lock, stopToken, [&] {
+                return sidecarSession_.load(std::memory_order_acquire) !=
+                       handledSession;
+            });
+        }
+        if (stopToken.stop_requested()) {
+            return;
+        }
+
+        handledSession =
+            sidecarSession_.load(std::memory_order_acquire);
+        if (!sidecarActive_.load(std::memory_order_acquire)) {
+            continue;
+        }
+
+        std::optional<std::filesystem::path> path;
+        {
+            std::scoped_lock lock(sidecarMutex_);
+            path = sidecarPath_;
+        }
+        if (!path) {
+            continue;
+        }
+
+        spdlog::info(
+            "Starting main-menu XWM sidecar: {}",
+            Utf8Path(*path));
+        DecodeAudioSession(*path, handledSession, stopToken, true);
+    }
+}
+
 void VideoPlayer::DecodeAudioSession(
     const std::filesystem::path& path,
     const std::uint64_t session,
-    std::stop_token stopToken)
+    std::stop_token stopToken,
+    const bool sidecar)
 {
     constexpr int kOutputSampleRate{ 48000 };
     constexpr int kOutputChannels{ 2 };
     constexpr AVSampleFormat kOutputFormat{ AV_SAMPLE_FMT_S16 };
 
-    while (!stopToken.stop_requested() &&
-           SessionActive(session) &&
+    const auto sessionActive = [&] {
+        return sidecar ?
+            SidecarSessionActive(session) :
+            SessionActive(session);
+    };
+
+    while (!sidecar &&
+           !stopToken.stop_requested() &&
+           sessionActive() &&
            !GetLatestFrame()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    if (stopToken.stop_requested() || !SessionActive(session)) {
+    if (stopToken.stop_requested() || !sessionActive()) {
         return;
     }
 
@@ -508,6 +595,7 @@ void VideoPlayer::DecodeAudioSession(
         cleanUp();
         return;
     }
+    output.SetVolume(Volume());
 
     spdlog::info(
         "Playing audio stream {} with {} decoder: {} Hz, {} channels",
@@ -517,21 +605,22 @@ void VideoPlayer::DecodeAudioSession(
         decoder->channels);
 
     AVStream* stream = format->streams[audioStream];
-    while (!stopToken.stop_requested() && SessionActive(session)) {
+    while (!stopToken.stop_requested() && sessionActive()) {
         if (!PlaybackMayAdvance()) {
             output.Pause();
             while (!stopToken.stop_requested() &&
-                   SessionActive(session) &&
+                   sessionActive() &&
                    !PlaybackMayAdvance()) {
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(10));
             }
             output.Resume();
-            if (stopToken.stop_requested() || !SessionActive(session)) {
+            if (stopToken.stop_requested() || !sessionActive()) {
                 break;
             }
         }
 
+        output.SetVolume(Volume());
         result = av_read_frame(format, packet);
         if (result < 0) {
             const std::int64_t seekTarget =
@@ -569,20 +658,20 @@ void VideoPlayer::DecodeAudioSession(
         }
 
         while (avcodec_receive_frame(decoder, decoded) == 0) {
-            if (stopToken.stop_requested() || !SessionActive(session)) {
+            if (stopToken.stop_requested() || !sessionActive()) {
                 break;
             }
             if (!PlaybackMayAdvance()) {
                 output.Pause();
                 while (!stopToken.stop_requested() &&
-                       SessionActive(session) &&
+                       sessionActive() &&
                        !PlaybackMayAdvance()) {
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(10));
                 }
                 output.Resume();
                 if (stopToken.stop_requested() ||
-                    !SessionActive(session)) {
+                    !sessionActive()) {
                     break;
                 }
             }
@@ -744,7 +833,7 @@ bool VideoPlayer::DecodeSession(
 
     std::jthread audioWorker(
         [this, path, session](std::stop_token audioStopToken) {
-            DecodeAudioSession(path, session, audioStopToken);
+            DecodeAudioSession(path, session, audioStopToken, false);
         });
 
     std::int64_t firstTimestamp = AV_NOPTS_VALUE;

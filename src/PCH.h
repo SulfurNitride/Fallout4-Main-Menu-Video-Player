@@ -12,12 +12,14 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cctype>
+#include <cwctype>
 #include <cstring>
 #include <filesystem>
 #include <format>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <ranges>
 #include <stop_token>

@@ -180,7 +180,10 @@ public:
             "Started XAudio2 output: {} Hz, {} channels, signed 16-bit",
             sampleRate,
             channels);
-        paused_ = false;
+        paused_.store(false, std::memory_order_release);
+        channels_ = channels;
+        SetVolume(volume_);
+        SetPan(pan_);
         return true;
     }
 
@@ -223,10 +226,11 @@ public:
 
     void Pause()
     {
-        if (sourceVoice_ && !paused_) {
+        if (sourceVoice_ &&
+            !paused_.load(std::memory_order_acquire)) {
             const HRESULT result = sourceVoice_->Stop();
             if (SUCCEEDED(result)) {
-                paused_ = true;
+                paused_.store(true, std::memory_order_release);
             } else {
                 spdlog::warn(
                     "Pausing XAudio2 failed: {:08X}",
@@ -237,15 +241,69 @@ public:
 
     void Resume()
     {
-        if (sourceVoice_ && paused_) {
+        if (sourceVoice_ &&
+            paused_.load(std::memory_order_acquire)) {
             const HRESULT result = sourceVoice_->Start();
             if (SUCCEEDED(result)) {
-                paused_ = false;
+                paused_.store(false, std::memory_order_release);
             } else {
                 spdlog::warn(
                     "Resuming XAudio2 failed: {:08X}",
                     static_cast<std::uint32_t>(result));
             }
+        }
+    }
+
+    void SetVolume(const float volume)
+    {
+        volume_ = std::clamp(volume, 0.0F, 2.0F);
+        if (sourceVoice_) {
+            const HRESULT result = sourceVoice_->SetVolume(volume_);
+            if (FAILED(result)) {
+                spdlog::warn(
+                    "Setting XAudio2 volume failed: {:08X}",
+                    static_cast<std::uint32_t>(result));
+            }
+        }
+    }
+
+    void SetPan(const float pan)
+    {
+        pan_ = std::clamp(pan, -1.0F, 1.0F);
+        if (!sourceVoice_ || !masteringVoice_ || channels_ != 2) {
+            return;
+        }
+        // Let XAudio route ordinary stereo directly. In particular, Wine's
+        // XAudio implementation can expose a multichannel mastering voice
+        // even for headphones, and overriding its default matrix at center
+        // pan can collapse the right channel.
+        if (std::abs(pan_) < 0.0001F) {
+            return;
+        }
+
+        XAUDIO2_VOICE_DETAILS destinationDetails{};
+        masteringVoice_->GetVoiceDetails(&destinationDetails);
+        if (destinationDetails.InputChannels < 2) {
+            return;
+        }
+
+        const float left = pan_ > 0.0F ? 1.0F - pan_ : 1.0F;
+        const float right = pan_ < 0.0F ? 1.0F + pan_ : 1.0F;
+        std::vector<float> matrix(
+            static_cast<std::size_t>(2) *
+                destinationDetails.InputChannels,
+            0.0F);
+        matrix[0] = left;
+        matrix[destinationDetails.InputChannels + 1] = right;
+        const HRESULT result = sourceVoice_->SetOutputMatrix(
+            masteringVoice_,
+            2,
+            destinationDetails.InputChannels,
+            matrix.data());
+        if (FAILED(result)) {
+            spdlog::warn(
+                "Setting XAudio2 pan matrix failed: {:08X}",
+                static_cast<std::uint32_t>(result));
         }
     }
 
@@ -258,7 +316,8 @@ public:
             sourceVoice_ = nullptr;
         }
         callback_.Clear();
-        paused_ = false;
+        paused_.store(false, std::memory_order_release);
+        channels_ = 0;
         if (masteringVoice_) {
             masteringVoice_->DestroyVoice();
             masteringVoice_ = nullptr;
@@ -266,14 +325,18 @@ public:
     }
 
 private:
-    static constexpr UINT32 kMaximumQueuedBuffers{ 8 };
+    // Keep latency low enough that a seek can flush stale audio promptly.
+    static constexpr UINT32 kMaximumQueuedBuffers{ 2 };
 
     IXAudio2* engine_{ nullptr };
     IXAudio2MasteringVoice* masteringVoice_{ nullptr };
     IXAudio2SourceVoice* sourceVoice_{ nullptr };
     VoiceCallback callback_;
     bool comInitialized_{ false };
-    bool paused_{ false };
+    std::atomic<bool> paused_{ false };
+    std::uint16_t channels_{ 0 };
+    float volume_{ 1.0F };
+    float pan_{ 0.0F };
 };
 
 AudioOutput::AudioOutput() :
@@ -302,6 +365,16 @@ void AudioOutput::Pause()
 void AudioOutput::Resume()
 {
     implementation_->Resume();
+}
+
+void AudioOutput::SetVolume(const float volume)
+{
+    implementation_->SetVolume(volume);
+}
+
+void AudioOutput::SetPan(const float pan)
+{
+    implementation_->SetPan(pan);
 }
 
 void AudioOutput::Reset()

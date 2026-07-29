@@ -9,6 +9,22 @@ This project uses the following open-source libraries:
 - spdlog (MIT), https://github.com/gabime/spdlog
 - fmt (MIT), https://github.com/fmtlib/fmt
 
+The developer-only ESP-FE generator uses Mutagen (GPL-3.0),
+https://github.com/Mutagen-Modding/Mutagen. Mutagen is restored from NuGet
+when that separate C# tool is built; it is not linked into or distributed
+with the runtime DLL or FOMOD.
+
+The developer-only Papyrus build uses Caprica (MIT),
+https://github.com/Orvid/Caprica. Caprica converts the included PSC source into
+PEX files and is not distributed with or required by the installed mod.
+
+The OG native Papyrus registration is compiled against the official F4SE
+0.6.23 plugin SDK. The SDK source and tools are not redistributed with this
+mod; Fallout 4 Script Extender remains a runtime requirement.
+
+Modified vanilla NIF/BGSM assets are reproducibly prepared with the external
+Rust-BSA-BA2-Handler tool. That utility is not redistributed with this mod.
+
 The black MainMenuLoop carrier was encoded with the RAD Video Tools for this
 noncommercial Fallout 4 mod. Bink Video is a trademark of Epic Games Tools
 (formerly RAD Game Tools). The encoder is not redistributed with this mod.

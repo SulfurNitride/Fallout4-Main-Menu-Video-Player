@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "main-menu-video-player",
-  "version-string": "0.1.0",
+  "version-string": "0.1.1",
   "supports": "windows & x64",
   "dependencies": [
     {

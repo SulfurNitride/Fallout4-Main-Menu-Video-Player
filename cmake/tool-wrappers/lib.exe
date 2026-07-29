@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+# FFmpeg's MSVC makefiles invoke the archiver with Unix "rc archive files..."
+# syntax even though the selected tool is named lib.exe. Translate that form to
+# llvm-lib's native /OUT syntax and pass any other invocation through.
+if [ "${1:-}" = "rc" ] || [ "${1:-}" = "rcs" ]; then
+    shift
+    output="$1"
+    shift
+    exec /usr/bin/llvm-lib "/OUT:${output}" "$@"
+fi
+
+exec /usr/bin/llvm-lib "$@"

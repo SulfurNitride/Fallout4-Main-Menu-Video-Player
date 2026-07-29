@@ -79,6 +79,18 @@ jobs:
           restore-keys: |
             vcpkg-${{ runner.os }}-
 
+      - name: Check out official F4SE 0.6.23 SDK
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force `
+            -Path "$env:GITHUB_WORKSPACE\f4se-sdk" | Out-Null
+          git clone --depth 1 --branch v0.6.23 `
+            https://github.com/ianpatt/f4se.git `
+            "$env:GITHUB_WORKSPACE\f4se-sdk\f4se"
+          git clone --depth 1 `
+            https://github.com/ianpatt/common.git `
+            "$env:GITHUB_WORKSPACE\f4se-sdk\common"
+
       - name: Configure
         shell: pwsh
         env:
@@ -92,7 +104,8 @@ jobs:
             -DVCPKG_APPLOCAL_DEPS=OFF `
             -DVCPKG_OVERLAY_PORTS="$env:GITHUB_WORKSPACE\cmake\ports" `
             -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE\cmake\triplets" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
+            -DMMVP_F4SE_OG_SDK="$env:GITHUB_WORKSPACE\f4se-sdk"
 
       - name: Build FOMOD
         shell: pwsh
@@ -115,6 +128,16 @@ jobs:
             "fomod\info.xml",
             "fomod\ModuleConfig.xml",
             "common\F4SE\Plugins\MainMenuVideoPlayer.ini",
+            "common\MMVP_WorldScreens.esp",
+            "common\Scripts\MMVP\HolotapeQuest.pex",
+            "common\Scripts\Fragments\Terminals\TERM_MMVP_PlayerTerminal_00000808.pex",
+            "common\Meshes\MMVP\TelevisionWorkshopVariant01.nif",
+            "common\Meshes\MMVP\TelevisionWorkshopVariant02.nif",
+            "common\Meshes\MMVP\FilmProjector.nif",
+            "common\Meshes\MMVP\MovieScreen.nif",
+            "common\Materials\MMVP\World\MovieScreenProjectionSurface_BillboardSignDefault01ReplacementMMVP.BGSM",
+            "common\Textures\MMVP\World\TelevisionScreenOutput1_d.dds",
+            "common\Textures\MMVP\World\MovieProjectorScreenOutput00001_d.dds",
             "common\Video\MainMenuLoop.bk2",
             "runtime\OG\F4SE\Plugins\MainMenuVideoPlayer.dll",
             "runtime\NG\F4SE\Plugins\MainMenuVideoPlayer.dll",

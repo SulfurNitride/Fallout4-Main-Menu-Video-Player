@@ -5,6 +5,10 @@
 #include "EngineSettings.h"
 #include "F4SEMinimal.h"
 #include "Log.h"
+#include "PipBoyPlayer.h"
+#include "Serialization.h"
+#include "WorldPlayback.h"
+#include "WorldTextureBridge.h"
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -98,5 +102,16 @@ extern "C" __declspec(dllexport) bool F4SEPlugin_Load(
         return false;
     }
     spdlog::info("Native Bink substitution hooks installed successfully");
+    if (!WorldPlayback::GetSingleton().Initialize()) {
+        spdlog::critical("Failed to initialize world playback sessions");
+        return false;
+    }
+    if (!PipBoyPlayer::InitializeScaleform(f4se)) {
+        return false;
+    }
+    Serialization::Initialize(f4se);
+    spdlog::info(
+        "World texture hook discovery deferred until the renderer opens "
+        "the main-menu Bink");
     return true;
 }
