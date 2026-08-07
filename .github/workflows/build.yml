@@ -6,6 +6,16 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+  # GitHub evicts Actions caches that have not been accessed for seven days.
+  # Refresh the expensive AOM/FFmpeg binary cache before that can happen.
+  schedule:
+    - cron: "17 8 * * 1,5"
+
+# A fast-forward merge can briefly trigger both pull_request and push for the
+# same commit. Keep only the newest copy of that build.
+concurrency:
+  group: build-${{ github.event_name == 'schedule' && github.run_id || github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -183,6 +193,7 @@ jobs:
           [xml](Get-Content (Join-Path $expanded "fomod\ModuleConfig.xml")) | Out-Null
 
       - name: Upload FOMOD
+        if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v4
         with:
           name: MainMenuVideoPlayer-FOMOD

@@ -19,11 +19,11 @@ same basename:
     AwesomeVideo.xwm
 
 The XWM starts with the Bink, loops at its end, and uses MMVP's volume keys.
-Audio embedded directly in a BK2 uses the same volume keys. MMVP scales the
-volume Fallout assigns to each observed audio track instead of assuming track
-numbers, so BK2 files with different audio-track layouts remain safe.
-When an XWM sidecar is present, it takes priority: MMVP mutes every embedded
-BK2 audio track before playback and plays only the XWM soundtrack.
+Audio embedded directly in a BK2 uses the same volume keys. MMVP asks Bink for
+every selected file's actual audio-track IDs instead of assuming track numbers,
+so BK2 files with different track layouts remain safe. When an XWM sidecar is
+present, it takes priority: MMVP keeps the BK2 audio clock running but sets
+every embedded track to zero volume, then plays only the XWM soundtrack.
 If MainMenuAudio contains a supported file, that dedicated library takes
 priority instead. Same-name sidecars remain ignored while it plays; M restores
 the video's own embedded/original audio stream.

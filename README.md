@@ -75,8 +75,9 @@ The hotkeys can be changed or disabled in `Data/F4SE/Plugins/MainMenuVideoPlayer
 ## BK2 audio
 
 Audio tracks embedded in a selected BK2 obey `MainMenuVolume` and the Page Up
-and Page Down volume controls. MMVP preserves Fallout's own per-track volume
-and applies its volume as a multiplier; silent BK2 files remain silent.
+and Page Down volume controls. MMVP asks Bink for every selected file's actual
+track IDs and applies Fallout's main-menu source volume as a multiplier; silent
+BK2 files remain silent.
 
 If a BK2 video has no built-in audio, place an XWM file beside it with the same name:
 
@@ -85,9 +86,10 @@ AwesomeVideo.bk2
 AwesomeVideo.xwm
 ```
 
-A matching XWM is an explicit audio override. MMVP disables all audio embedded
-in that BK2 before playback begins and plays only the XWM soundtrack. This
-same-name sidecar behavior applies when no dedicated soundtrack is playing.
+A matching XWM is an explicit audio override. MMVP keeps the BK2 audio clock
+running but sets every embedded track to zero volume, then plays only the XWM
+soundtrack. This same-name sidecar behavior applies when no dedicated
+soundtrack is playing.
 
 ## Dedicated main-menu audio
 
