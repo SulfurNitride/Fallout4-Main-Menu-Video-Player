@@ -12,16 +12,20 @@ namespace PipBoyPlayer
 {
     namespace
     {
-        constexpr std::uint32_t kScaleformTypeMask{ 0x8F };
-        constexpr std::size_t kMovieRootOffset{ 0x18 };
         constexpr std::size_t kGetMovieDefVtableIndex{ 0x01 };
         constexpr std::size_t kGetFileUrlVtableIndex{ 0x0C };
-        constexpr std::size_t kGetMouseStateVtableIndex{ 0x24 };
-        constexpr std::size_t kSetVariableVtableIndex{ 0x31 };
-        constexpr std::size_t kGetVariableVtableIndex{ 0x32 };
-        constexpr std::string_view kCommandPath{
-            "root.f4se.plugins.MainMenuVideoPlayer.command"
-        };
+        constexpr std::size_t kMovieRootOffset{ 0x18 };
+        constexpr std::size_t kCreateStringVtableIndex{ 0x2C };
+        constexpr std::size_t kCreateFunctionVtableIndex{ 0x30 };
+        constexpr std::uint32_t kScaleformTypeMask{ 0x8F };
+        constexpr std::uint32_t kScaleformManagedFlag{ 1U << 6U };
+        constexpr std::uint32_t kScaleformBoolType{ 2 };
+        constexpr std::uint32_t kScaleformIntType{ 3 };
+        constexpr std::uint32_t kScaleformUIntType{ 4 };
+        constexpr std::uint32_t kScaleformStringType{ 6 };
+        constexpr std::uint32_t kScaleformObjectType{ 8 };
+        constexpr std::uint32_t kScaleformArrayType{ 9 };
+        constexpr std::uint32_t kScaleformDisplayObjectType{ 10 };
         constexpr std::uint64_t kFadeMilliseconds{ 500 };
         constexpr std::uint32_t kScaleformDiagnosticLimit{ 64 };
 
@@ -33,6 +37,32 @@ namespace PipBoyPlayer
             std::uint64_t value{ 0 };
             void* unknown{ nullptr };
         };
+        static_assert(sizeof(ScaleformValue) == 0x20);
+
+        class ScaleformFunctionHandler
+        {
+        public:
+            struct Parameters
+            {
+                ScaleformValue* result;
+                void* movie;
+                ScaleformValue* self;
+                ScaleformValue* argumentsWithThis;
+                ScaleformValue* arguments;
+                std::uint32_t argumentCount;
+                std::uint32_t padding;
+                void* userData;
+            };
+            static_assert(sizeof(Parameters) == 0x38);
+
+            virtual ~ScaleformFunctionHandler() = default;
+            virtual void Call(const Parameters& parameters) = 0;
+
+        protected:
+            volatile std::int32_t referenceCount{ 1 };
+            std::uint32_t padding{ 0 };
+        };
+        static_assert(sizeof(ScaleformFunctionHandler) == 0x10);
 
         struct MenuCursorState
         {
@@ -72,16 +102,36 @@ namespace PipBoyPlayer
             PlaybackChannel channel{ PlaybackChannel::kProjector };
         };
 
+        struct ContinueItem
+        {
+            PlaybackChannel channel{ PlaybackChannel::kProjector };
+            MediaLibrary::Item media;
+            MediaProgress progress;
+        };
+
         std::atomic<bool> active{ false };
-        std::atomic<void*> pipBoyMovieView{ nullptr };
-        std::atomic<void*> cursorMovieView{ nullptr };
-        std::atomic<void*> pipBoyMovieRoot{ nullptr };
+        std::atomic<bool> interfaceActive{ false };
+        std::atomic<std::int32_t> browserSelection{ 0 };
+        std::atomic<std::int32_t> browserViewDepth{ 0 };
+        std::atomic<std::uint64_t> browserSelectionReportTick{ 0 };
+        std::atomic<std::uint64_t> browserLastClickTick{ 0 };
+        std::atomic<std::int32_t> browserAcceptRequested{ -1 };
+        std::atomic<std::int32_t> browserNavigationRequested{ 0 };
+        std::atomic<std::uint64_t> suppressLegacyTabUntil{ 0 };
         std::atomic<std::uint32_t> scaleformCallbackCount{ 0 };
         std::atomic<bool> loggedCursorSource{ false };
+        std::atomic<bool> scaleformCommandBridgeReady{ false };
+        std::atomic<bool> browserBackRequested{ false };
+        std::atomic<bool> browserProgressRefreshRequested{ false };
         std::mutex uiMutex;
+        std::mutex composedMutex;
+        std::mutex continueMutex;
         UiState ui;
         ComposedFrame composed;
+        std::vector<ContinueItem> continueItems;
         std::uintptr_t menuCursorSingletonOffset{ 0 };
+        std::uintptr_t scaleformSetMemberOffset{ 0 };
+        std::uintptr_t scaleformObjectReleaseOffset{ 0 };
 
         std::uintptr_t MenuCursorOffset(const std::uint32_t runtime)
         {
@@ -102,12 +152,126 @@ namespace PipBoyPlayer
                 return 0;
             }
         }
+
+        struct ScaleformOffsets
+        {
+            std::uintptr_t setMember;
+            std::uintptr_t objectRelease;
+        };
+
+        ScaleformOffsets RuntimeScaleformOffsets(
+            const std::uint32_t runtime)
+        {
+            switch (runtime) {
+            case F4SEMinimal::kRuntimeOg:
+                return { 0x20D05E0, 0x20B9C80 };
+            case F4SEMinimal::kRuntimeNg980:
+                return { 0x19CB820, 0x19BB450 };
+            case F4SEMinimal::kRuntimeNg984:
+                return { 0x19CBBF0, 0x19BB820 };
+            case F4SEMinimal::kRuntimeAe137:
+                return { 0x1AE1170, 0x1AD0E20 };
+            case F4SEMinimal::kRuntimeAe159:
+                return { 0x1AE1860, 0x1AD1510 };
+            case F4SEMinimal::kRuntimeAe169:
+                return { 0x1AE21E0, 0x1AD1E90 };
+            case F4SEMinimal::kRuntimeAe191:
+                return { 0x1AE6920, 0x1AD65D0 };
+            case F4SEMinimal::kRuntimeAe221:
+                return { 0x1AE6A40, 0x1AD66F0 };
+            default:
+                return {};
+            }
+        }
+
         WorldPlaybackSession* PlayerFor(const PlaybackChannel channel)
         {
             auto& playback = WorldPlayback::GetSingleton();
             return channel == PlaybackChannel::kTelevision ?
                 playback.Television() :
                 playback.Projector();
+        }
+
+        std::int32_t RebuildContinueItems()
+        {
+            std::vector<ContinueItem> rebuilt;
+            for (const auto channel : {
+                     PlaybackChannel::kTelevision,
+                     PlaybackChannel::kProjector }) {
+                auto* player = PlayerFor(channel);
+                if (!player) {
+                    continue;
+                }
+
+                auto catalog = player->AvailableMedia();
+                std::unordered_map<std::string, MediaLibrary::Item>
+                    mediaById;
+                mediaById.reserve(catalog.size());
+                for (auto& media : catalog) {
+                    mediaById.emplace(media.id, std::move(media));
+                }
+
+                for (auto& progress : player->ProgressHistory()) {
+                    if (progress.completed ||
+                        progress.positionSeconds <= 0.5) {
+                        continue;
+                    }
+                    auto found = mediaById.find(progress.mediaId);
+                    if (found == mediaById.end()) {
+                        continue;
+                    }
+                    rebuilt.push_back(ContinueItem{
+                        .channel = channel,
+                        .media = found->second,
+                        .progress = std::move(progress)
+                    });
+                }
+            }
+
+            std::ranges::sort(
+                rebuilt,
+                std::greater{},
+                [](const ContinueItem& item) {
+                    return item.progress.lastPlayedMilliseconds;
+                });
+            if (rebuilt.size() > 10000) {
+                rebuilt.resize(10000);
+            }
+            const auto count =
+                static_cast<std::int32_t>(rebuilt.size());
+            {
+                std::scoped_lock lock(continueMutex);
+                continueItems = std::move(rebuilt);
+            }
+            return count;
+        }
+
+        std::optional<ContinueItem> ContinueItemAt(
+            const std::int32_t index)
+        {
+            if (index < 0) {
+                return std::nullopt;
+            }
+            std::scoped_lock lock(continueMutex);
+            const auto converted = static_cast<std::size_t>(index);
+            return converted < continueItems.size() ?
+                std::optional<ContinueItem>(continueItems[converted]) :
+                std::nullopt;
+        }
+
+        void SetBrowserActive(bool value, bool reset = true);
+
+        std::optional<PlaybackChannel> BrowserChannel(
+            const std::int32_t value)
+        {
+            switch (value) {
+            case 1:
+                return PlaybackChannel::kProjector;
+            case 2:
+                return PlaybackChannel::kTelevision;
+            default:
+                return std::nullopt;
+            }
         }
 
         PlaybackChannel SelectedChannel()
@@ -133,25 +297,6 @@ namespace PipBoyPlayer
             } else {
                 player->Play();
             }
-        }
-
-        void SetFalloutCursorVisible(const bool visible)
-        {
-            void* movieView =
-                cursorMovieView.load(std::memory_order_acquire);
-            if (!movieView) {
-                return;
-            }
-            void** vtable = *reinterpret_cast<void***>(movieView);
-            constexpr std::size_t kSetVisibleVtableIndex{ 0x09 };
-            if (!vtable || !vtable[kSetVisibleVtableIndex]) {
-                return;
-            }
-            using SetVisible = void (*)(void*, bool);
-            reinterpret_cast<SetVisible>(
-                vtable[kSetVisibleVtableIndex])(
-                movieView,
-                visible);
         }
 
         std::uint32_t OverlayAlpha(const std::uint64_t now)
@@ -278,7 +423,7 @@ namespace PipBoyPlayer
             }
         }
 
-        void ActivatePlayer()
+        void ActivatePlayer(const bool startIfNeeded = true)
         {
             if (!Config::EnablePipBoyPlayer()) {
                 return;
@@ -296,13 +441,15 @@ namespace PipBoyPlayer
             }
             loggedCursorSource.store(false, std::memory_order_release);
             if (InputRouter::Install()) {
+                InputRouter::SetRawInputCapture(true);
                 spdlog::debug(
                     "Pip-Boy player is using the shared input router");
             }
-            SetFalloutCursorVisible(false);
             UpdateConsumers();
 
-            StartPlayerIfNeeded(SelectedPlayer());
+            if (startIfNeeded) {
+                StartPlayerIfNeeded(SelectedPlayer());
+            }
             if (!wasActive) {
                 spdlog::info("MMVP Pip-Boy video program activated");
             }
@@ -323,12 +470,1003 @@ namespace PipBoyPlayer
                 ui.channel = channel;
                 ++ui.revision;
             }
+            {
+                std::scoped_lock lock(composedMutex);
+                composed = {};
+            }
             player->RefreshLibrary();
             player->Next();
-            ActivatePlayer();
+            // Next() already queued the requested random item. Do not issue
+            // another startup request while activating the native overlay.
+            ActivatePlayer(false);
             spdlog::info(
                 "Accepted Pip-Boy terminal request for a random {} video",
                 PlaybackChannelName(channel));
+        }
+
+        bool ActivateMedia(
+            const PlaybackChannel channel,
+            const std::string_view mediaId)
+        {
+            auto* player = PlayerFor(channel);
+            if (!player || mediaId.empty() || !player->Select(mediaId)) {
+                return false;
+            }
+            {
+                std::scoped_lock lock(uiMutex);
+                ui.channel = channel;
+                ++ui.revision;
+            }
+            {
+                std::scoped_lock lock(composedMutex);
+                composed = {};
+            }
+            // Select() already queued this exact item and its saved position.
+            // Calling the generic startup helper here could race it with an
+            // extra Next() and replace it with a random playlist item.
+            ActivatePlayer(false);
+            SetBrowserActive(false);
+            spdlog::info(
+                "Accepted exact Pip-Boy {} media id {}",
+                PlaybackChannelName(channel),
+                mediaId);
+            return true;
+        }
+
+        void ActivateResume()
+        {
+            struct Candidate
+            {
+                PlaybackChannel channel;
+                MediaProgress progress;
+            };
+
+            std::vector<Candidate> candidates;
+            for (const auto channel : {
+                     PlaybackChannel::kTelevision,
+                     PlaybackChannel::kProjector }) {
+                auto* player = PlayerFor(channel);
+                if (!player) {
+                    continue;
+                }
+                if (auto progress = player->MostRecentProgress()) {
+                    candidates.push_back({
+                        .channel = channel,
+                        .progress = std::move(*progress)
+                    });
+                }
+            }
+            std::ranges::sort(
+                candidates,
+                std::greater{},
+                [](const Candidate& candidate) {
+                    return candidate.progress.lastPlayedMilliseconds;
+                });
+
+            for (const auto& candidate : candidates) {
+                if (ActivateMedia(
+                        candidate.channel,
+                        candidate.progress.mediaId)) {
+                    spdlog::info(
+                        "Resumed most recent MMVP media at {:.1f} seconds",
+                        candidate.progress.completed ?
+                            0.0 :
+                            candidate.progress.positionSeconds);
+                    return;
+                }
+            }
+
+            spdlog::info(
+                "MMVP Resume has no saved media history; "
+                "continuing the current player");
+            ActivatePlayer();
+        }
+
+        void SetBrowserActive(
+            const bool value,
+            const bool reset)
+        {
+            const bool wasActive =
+                interfaceActive.exchange(value, std::memory_order_acq_rel);
+            browserBackRequested.store(false, std::memory_order_release);
+            if (value && reset) {
+                browserSelection.store(0, std::memory_order_release);
+                browserViewDepth.store(0, std::memory_order_release);
+                browserSelectionReportTick.store(
+                    0,
+                    std::memory_order_release);
+                browserLastClickTick.store(0, std::memory_order_release);
+                browserAcceptRequested.store(-1, std::memory_order_release);
+                browserNavigationRequested.store(
+                    0,
+                    std::memory_order_release);
+            }
+            if (wasActive != value) {
+                spdlog::info(
+                    "MMVP holotape browser input lock {}",
+                    value ? "activated" : "released");
+            }
+            InputRouter::SetRawInputCapture(value || Active());
+        }
+
+        void ActivateBrowserSelection(const std::int32_t selection)
+        {
+            switch (selection) {
+            case 0:
+                ActivateRandom(PlaybackChannel::kProjector);
+                break;
+            case 1:
+                ActivateRandom(PlaybackChannel::kTelevision);
+                break;
+            case 2:
+                ActivateRandom(
+                    (GetTickCount64() & 1U) != 0 ?
+                        PlaybackChannel::kProjector :
+                        PlaybackChannel::kTelevision);
+                break;
+            case 3:
+                ActivateResume();
+                break;
+            default:
+                break;
+            }
+            SetBrowserActive(false);
+        }
+
+        void SetScaleformBoolean(
+            ScaleformValue* result,
+            const bool value)
+        {
+            if (!result) {
+                return;
+            }
+            result->objectInterface = nullptr;
+            result->type = kScaleformBoolType;
+            result->value = value ? 1U : 0U;
+            result->unknown = nullptr;
+        }
+
+        void SetScaleformInteger(
+            ScaleformValue* result,
+            const std::int32_t value)
+        {
+            if (!result) {
+                return;
+            }
+            result->objectInterface = nullptr;
+            result->type = kScaleformIntType;
+            result->value = static_cast<std::uint32_t>(value);
+            result->unknown = nullptr;
+        }
+
+        void SetScaleformString(
+            const ScaleformFunctionHandler::Parameters& parameters,
+            const std::string_view value)
+        {
+            if (!parameters.result || !parameters.movie) {
+                return;
+            }
+            void* movieRoot = *reinterpret_cast<void**>(
+                static_cast<std::byte*>(parameters.movie) +
+                kMovieRootOffset);
+            if (!movieRoot) {
+                return;
+            }
+            void** vtable = *reinterpret_cast<void***>(movieRoot);
+            if (!vtable || !vtable[kCreateStringVtableIndex]) {
+                return;
+            }
+            const std::string copy(value);
+            using CreateString = void (*)(
+                void*,
+                ScaleformValue*,
+                const char*);
+            reinterpret_cast<CreateString>(
+                vtable[kCreateStringVtableIndex])(
+                movieRoot,
+                parameters.result,
+                copy.c_str());
+        }
+
+        std::optional<std::int32_t> ScaleformInteger(
+            const ScaleformValue& value)
+        {
+            switch (value.type & kScaleformTypeMask) {
+            case 2:
+            case 3:
+            case 4:
+                return static_cast<std::int32_t>(
+                    static_cast<std::uint32_t>(value.value));
+            case 5:
+                return static_cast<std::int32_t>(
+                    std::bit_cast<double>(value.value));
+            default:
+                return std::nullopt;
+            }
+        }
+
+        std::optional<std::string_view> ScaleformString(
+            const ScaleformValue& value)
+        {
+            if ((value.type & kScaleformTypeMask) !=
+                kScaleformStringType) {
+                return std::nullopt;
+            }
+            const char* text = nullptr;
+            if ((value.type & kScaleformManagedFlag) != 0) {
+                const char* const* managed =
+                    reinterpret_cast<const char* const*>(value.value);
+                text = managed ? *managed : nullptr;
+            } else {
+                text = reinterpret_cast<const char*>(value.value);
+            }
+            return text ? std::optional<std::string_view>(text) :
+                          std::nullopt;
+        }
+
+        class GetApiVersionHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                if (!parameters.result) {
+                    return;
+                }
+                parameters.result->objectInterface = nullptr;
+                parameters.result->type = kScaleformUIntType;
+                parameters.result->value = 4;
+                parameters.result->unknown = nullptr;
+            }
+        };
+
+        class PlayCommandHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                bool accepted = false;
+                if (InterfaceActive() &&
+                    parameters.arguments &&
+                    parameters.argumentCount >= 1) {
+                    const auto command =
+                        ScaleformInteger(parameters.arguments[0]);
+                    if (command) {
+                        switch (*command) {
+                        case 1:
+                            ActivateBrowserSelection(0);
+                            accepted = true;
+                            break;
+                        case 2:
+                            ActivateBrowserSelection(1);
+                            accepted = true;
+                            break;
+                        case 3:
+                            ActivateBrowserSelection(3);
+                            accepted = true;
+                            break;
+                        default:
+                            break;
+                        }
+                        if (accepted) {
+                            spdlog::info(
+                                "Accepted MMVP Scaleform playback command {}",
+                                *command);
+                        }
+                    }
+                }
+                SetScaleformBoolean(parameters.result, accepted);
+            }
+        };
+
+        class SetSelectionHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                bool accepted = false;
+                if (InterfaceActive() &&
+                    parameters.arguments &&
+                    parameters.argumentCount >= 1) {
+                    const auto selection =
+                        ScaleformInteger(parameters.arguments[0]);
+                    if (selection && *selection >= 0 && *selection < 4) {
+                        const auto previous = browserSelection.exchange(
+                            *selection,
+                            std::memory_order_acq_rel);
+                        browserSelectionReportTick.store(
+                            GetTickCount64(),
+                            std::memory_order_release);
+                        if (parameters.argumentCount >= 2) {
+                            const auto depth =
+                                ScaleformInteger(parameters.arguments[1]);
+                            if (depth) {
+                                browserViewDepth.store(
+                                    std::clamp(*depth, 0, 1),
+                                    std::memory_order_release);
+                            }
+                        }
+                        if (previous != *selection) {
+                            spdlog::info(
+                                "MMVP Scaleform selected browser choice {}",
+                                *selection);
+                        }
+                        accepted = true;
+                    }
+                }
+                SetScaleformBoolean(parameters.result, accepted);
+            }
+        };
+
+        class RefreshMediaHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                std::int32_t count = 0;
+                if (InterfaceActive() &&
+                    parameters.arguments &&
+                    parameters.argumentCount >= 1) {
+                    const auto rawChannel =
+                        ScaleformInteger(parameters.arguments[0]);
+                    const auto channel = rawChannel ?
+                        BrowserChannel(*rawChannel) :
+                        std::nullopt;
+                    auto* player = channel ?
+                        PlayerFor(*channel) :
+                        nullptr;
+                    if (player) {
+                        // Browsing may rescan the catalog, but it must not
+                        // interrupt or advance either playback session.
+                        player->RefreshCatalog();
+                        count = static_cast<std::int32_t>(
+                            std::min<std::size_t>(
+                                player->MediaCount(),
+                                10000));
+                    }
+                }
+                SetScaleformInteger(parameters.result, count);
+            }
+        };
+
+        class GetMediaCountHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                std::int32_t count = 0;
+                if (InterfaceActive() &&
+                    parameters.arguments &&
+                    parameters.argumentCount >= 1) {
+                    const auto rawChannel =
+                        ScaleformInteger(parameters.arguments[0]);
+                    const auto channel = rawChannel ?
+                        BrowserChannel(*rawChannel) :
+                        std::nullopt;
+                    auto* player = channel ?
+                        PlayerFor(*channel) :
+                        nullptr;
+                    if (player) {
+                        count = static_cast<std::int32_t>(
+                            std::min<std::size_t>(
+                                player->MediaCount(),
+                                10000));
+                    }
+                }
+                SetScaleformInteger(parameters.result, count);
+            }
+        };
+
+        std::optional<MediaLibrary::Item> ScaleformMediaItem(
+            const ScaleformFunctionHandler::Parameters& parameters)
+        {
+            if (!InterfaceActive() ||
+                !parameters.arguments ||
+                parameters.argumentCount < 2) {
+                return std::nullopt;
+            }
+            const auto rawChannel =
+                ScaleformInteger(parameters.arguments[0]);
+            const auto rawIndex =
+                ScaleformInteger(parameters.arguments[1]);
+            const auto channel = rawChannel ?
+                BrowserChannel(*rawChannel) :
+                std::nullopt;
+            auto* player = channel ? PlayerFor(*channel) : nullptr;
+            if (!player || !rawIndex || *rawIndex < 0) {
+                return std::nullopt;
+            }
+            const auto index = static_cast<std::size_t>(*rawIndex);
+            return player->MediaAt(index);
+        }
+
+        class GetMediaIdHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const auto item = ScaleformMediaItem(parameters);
+                SetScaleformString(
+                    parameters,
+                    item ? item->id : std::string_view{});
+            }
+        };
+
+        class GetMediaLabelHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const auto item = ScaleformMediaItem(parameters);
+                SetScaleformString(
+                    parameters,
+                    item ? item->displayName : std::string_view{});
+            }
+        };
+
+        class GetMediaProgressHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                std::int32_t percentage = -1;
+                if (InterfaceActive() &&
+                    parameters.arguments &&
+                    parameters.argumentCount >= 2) {
+                    const auto rawChannel =
+                        ScaleformInteger(parameters.arguments[0]);
+                    const auto mediaId =
+                        ScaleformString(parameters.arguments[1]);
+                    const auto channel = rawChannel ?
+                        BrowserChannel(*rawChannel) :
+                        std::nullopt;
+                    auto* player = channel ?
+                        PlayerFor(*channel) :
+                        nullptr;
+                    if (player && mediaId) {
+                        const auto progress = player->Progress(*mediaId);
+                        if (progress) {
+                            if (progress->completed) {
+                                percentage = 100;
+                            } else if (progress->durationSeconds > 0.0) {
+                                percentage = std::clamp(
+                                    static_cast<std::int32_t>(
+                                        std::lround(
+                                            progress->positionSeconds /
+                                            progress->durationSeconds *
+                                            100.0)),
+                                    0,
+                                    99);
+                            } else {
+                                percentage = 0;
+                            }
+                        }
+                    }
+                }
+                SetScaleformInteger(parameters.result, percentage);
+            }
+        };
+
+        class RefreshContinueHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const auto count =
+                    InterfaceActive() ? RebuildContinueItems() : 0;
+                SetScaleformInteger(parameters.result, count);
+            }
+        };
+
+        std::optional<ContinueItem> ScaleformContinueItem(
+            const ScaleformFunctionHandler::Parameters& parameters)
+        {
+            if (!InterfaceActive() ||
+                !parameters.arguments ||
+                parameters.argumentCount < 1) {
+                return std::nullopt;
+            }
+            const auto rawIndex =
+                ScaleformInteger(parameters.arguments[0]);
+            return rawIndex ? ContinueItemAt(*rawIndex) : std::nullopt;
+        }
+
+        class GetContinueChannelHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const auto item = ScaleformContinueItem(parameters);
+                const auto channel = item &&
+                                     item->channel ==
+                                         PlaybackChannel::kTelevision ?
+                    2 :
+                    item ? 1 : 0;
+                SetScaleformInteger(parameters.result, channel);
+            }
+        };
+
+        class GetContinueIdHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const auto item = ScaleformContinueItem(parameters);
+                SetScaleformString(
+                    parameters,
+                    item ? item->media.id : std::string_view{});
+            }
+        };
+
+        class GetContinueLabelHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const auto item = ScaleformContinueItem(parameters);
+                SetScaleformString(
+                    parameters,
+                    item ? item->media.displayName :
+                           std::string_view{});
+            }
+        };
+
+        class PlayMediaHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                bool accepted = false;
+                if (InterfaceActive() &&
+                    parameters.arguments &&
+                    parameters.argumentCount >= 2) {
+                    const auto rawChannel =
+                        ScaleformInteger(parameters.arguments[0]);
+                    const auto mediaId =
+                        ScaleformString(parameters.arguments[1]);
+                    const auto channel = rawChannel ?
+                        BrowserChannel(*rawChannel) :
+                        std::nullopt;
+                    if (channel && mediaId) {
+                        accepted = ActivateMedia(*channel, *mediaId);
+                    }
+                }
+                SetScaleformBoolean(parameters.result, accepted);
+            }
+        };
+
+        class ConsumeAcceptRequestHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const auto selection =
+                    InterfaceActive() ?
+                        browserAcceptRequested.exchange(
+                            -1,
+                            std::memory_order_acq_rel) :
+                        -1;
+                SetScaleformInteger(parameters.result, selection);
+            }
+        };
+
+        class ConsumeNavigationRequestHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const auto navigation =
+                    InterfaceActive() ?
+                        browserNavigationRequested.exchange(
+                            0,
+                            std::memory_order_acq_rel) :
+                        0;
+                SetScaleformInteger(parameters.result, navigation);
+            }
+        };
+
+        class ConsumeBackRequestHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const bool requested =
+                    InterfaceActive() &&
+                    browserBackRequested.exchange(
+                        false,
+                        std::memory_order_acq_rel);
+                if (requested) {
+                    spdlog::info(
+                        "MMVP browser SWF consumed the holotape Back request");
+                }
+                SetScaleformBoolean(parameters.result, requested);
+            }
+        };
+
+        class ConsumeProgressRefreshHandler final :
+            public ScaleformFunctionHandler
+        {
+        public:
+            void Call(const Parameters& parameters) override
+            {
+                const bool requested =
+                    InterfaceActive() &&
+                    browserProgressRefreshRequested.exchange(
+                        false,
+                        std::memory_order_acq_rel);
+                SetScaleformBoolean(parameters.result, requested);
+            }
+        };
+
+        bool RegisterScaleformFunction(
+            void* rawView,
+            void* rawRoot,
+            const char* name,
+            ScaleformFunctionHandler* handler)
+        {
+            if (!rawView || !rawRoot || !name || !handler ||
+                scaleformSetMemberOffset == 0 ||
+                scaleformObjectReleaseOffset == 0) {
+                return false;
+            }
+            auto* root = static_cast<ScaleformValue*>(rawRoot);
+            const auto rootType = root->type & kScaleformTypeMask;
+            if (!root->objectInterface ||
+                (rootType != kScaleformObjectType &&
+                 rootType != kScaleformArrayType &&
+                 rootType != kScaleformDisplayObjectType)) {
+                return false;
+            }
+
+            void* movieRoot = *reinterpret_cast<void**>(
+                static_cast<std::byte*>(rawView) + kMovieRootOffset);
+            if (!movieRoot) {
+                return false;
+            }
+            void** vtable = *reinterpret_cast<void***>(movieRoot);
+            if (!vtable || !vtable[kCreateFunctionVtableIndex]) {
+                return false;
+            }
+
+            ScaleformValue function{};
+            using CreateFunction = void (*)(
+                void*,
+                ScaleformValue*,
+                ScaleformFunctionHandler*,
+                void*);
+            reinterpret_cast<CreateFunction>(
+                vtable[kCreateFunctionVtableIndex])(
+                movieRoot,
+                &function,
+                handler,
+                nullptr);
+
+            const auto module = reinterpret_cast<std::uintptr_t>(
+                GetModuleHandleW(nullptr));
+            using SetMember = bool (*)(
+                void*,
+                void*,
+                const char*,
+                const ScaleformValue*,
+                bool);
+            const bool registered = reinterpret_cast<SetMember>(
+                module + scaleformSetMemberOffset)(
+                root->objectInterface,
+                reinterpret_cast<void*>(root->value),
+                name,
+                &function,
+                rootType == kScaleformDisplayObjectType);
+
+            if ((function.type & kScaleformManagedFlag) != 0 &&
+                function.objectInterface) {
+                using ObjectRelease = void (*)(
+                    void*,
+                    ScaleformValue*,
+                    void*);
+                reinterpret_cast<ObjectRelease>(
+                    module + scaleformObjectReleaseOffset)(
+                    function.objectInterface,
+                    &function,
+                    reinterpret_cast<void*>(function.value));
+            }
+            return registered;
+        }
+
+        bool RegisterCommandBridge(void* rawView, void* rawRoot)
+        {
+            static auto* getApiVersion = new GetApiVersionHandler();
+            static auto* playCommand = new PlayCommandHandler();
+            static auto* setSelection = new SetSelectionHandler();
+            static auto* consumeBackRequest =
+                new ConsumeBackRequestHandler();
+            static auto* consumeAcceptRequest =
+                new ConsumeAcceptRequestHandler();
+            static auto* consumeNavigationRequest =
+                new ConsumeNavigationRequestHandler();
+            static auto* consumeProgressRefresh =
+                new ConsumeProgressRefreshHandler();
+            static auto* refreshMedia = new RefreshMediaHandler();
+            static auto* getMediaCount = new GetMediaCountHandler();
+            static auto* getMediaId = new GetMediaIdHandler();
+            static auto* getMediaLabel = new GetMediaLabelHandler();
+            static auto* getMediaProgress =
+                new GetMediaProgressHandler();
+            static auto* refreshContinue =
+                new RefreshContinueHandler();
+            static auto* getContinueChannel =
+                new GetContinueChannelHandler();
+            static auto* getContinueId =
+                new GetContinueIdHandler();
+            static auto* getContinueLabel =
+                new GetContinueLabelHandler();
+            static auto* playMedia = new PlayMediaHandler();
+            const bool apiRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "getApiVersion",
+                getApiVersion);
+            const bool playRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "playCommand",
+                playCommand);
+            const bool selectionRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "setSelection",
+                setSelection);
+            const bool backRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "consumeBackRequest",
+                consumeBackRequest);
+            const bool acceptRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "consumeAcceptRequest",
+                consumeAcceptRequest);
+            const bool navigationRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "consumeNavigationRequest",
+                consumeNavigationRequest);
+            const bool progressRefreshRegistered =
+                RegisterScaleformFunction(
+                    rawView,
+                    rawRoot,
+                    "consumeProgressRefresh",
+                    consumeProgressRefresh);
+            const bool refreshRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "refreshMedia",
+                refreshMedia);
+            const bool countRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "getMediaCount",
+                getMediaCount);
+            const bool idRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "getMediaId",
+                getMediaId);
+            const bool labelRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "getMediaLabel",
+                getMediaLabel);
+            const bool progressRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "getMediaProgress",
+                getMediaProgress);
+            const bool continueRefreshRegistered =
+                RegisterScaleformFunction(
+                    rawView,
+                    rawRoot,
+                    "refreshContinue",
+                    refreshContinue);
+            const bool continueChannelRegistered =
+                RegisterScaleformFunction(
+                    rawView,
+                    rawRoot,
+                    "getContinueChannel",
+                    getContinueChannel);
+            const bool continueIdRegistered =
+                RegisterScaleformFunction(
+                    rawView,
+                    rawRoot,
+                    "getContinueId",
+                    getContinueId);
+            const bool continueLabelRegistered =
+                RegisterScaleformFunction(
+                    rawView,
+                    rawRoot,
+                    "getContinueLabel",
+                    getContinueLabel);
+            const bool exactPlayRegistered = RegisterScaleformFunction(
+                rawView,
+                rawRoot,
+                "playMedia",
+                playMedia);
+            return apiRegistered &&
+                   playRegistered &&
+                   selectionRegistered &&
+                   backRegistered &&
+                   acceptRegistered &&
+                   navigationRegistered &&
+                   progressRefreshRegistered &&
+                   refreshRegistered &&
+                   countRegistered &&
+                   idRegistered &&
+                   labelRegistered &&
+                   progressRegistered &&
+                   continueRefreshRegistered &&
+                   continueChannelRegistered &&
+                   continueIdRegistered &&
+                   continueLabelRegistered &&
+                   exactPlayRegistered;
+        }
+
+        bool BrowserCursorPosition(
+            float& stageX,
+            float& stageY,
+            float& normalizedY)
+        {
+            if (menuCursorSingletonOffset == 0) {
+                return false;
+            }
+            const auto module = reinterpret_cast<std::uintptr_t>(
+                GetModuleHandleW(nullptr));
+            if (module == 0) {
+                return false;
+            }
+            const auto* cursor = *reinterpret_cast<MenuCursorState**>(
+                module + menuCursorSingletonOffset);
+            if (!cursor ||
+                cursor->maxCursorX <= cursor->minCursorX ||
+                cursor->maxCursorY <= cursor->minCursorY) {
+                return false;
+            }
+
+            constexpr float kBrowserWidth{ 826.0F };
+            constexpr float kBrowserHeight{ 700.0F };
+            stageX =
+                static_cast<float>(
+                    cursor->cursorPosX - cursor->minCursorX) /
+                static_cast<float>(
+                    cursor->maxCursorX - cursor->minCursorX) *
+                kBrowserWidth;
+            normalizedY =
+                static_cast<float>(
+                    cursor->cursorPosY - cursor->minCursorY) /
+                static_cast<float>(
+                    cursor->maxCursorY - cursor->minCursorY);
+
+            // The 826x700 holotape stage is projected onto the curved Pip-Boy
+            // screen rather than stretched across the full desktop cursor
+            // range. The visible screen occupies approximately 13.5%-75.5%
+            // of the vertical MenuCursor range in the vanilla presentation.
+            // Convert that projected interval back into program-stage space;
+            // the former full-window mapping compressed all four rows into
+            // the first choice.
+            constexpr float kProjectedTop{ 0.135F };
+            constexpr float kProjectedHeight{ 0.620F };
+            stageY =
+                (normalizedY - kProjectedTop) /
+                kProjectedHeight *
+                kBrowserHeight;
+            return std::isfinite(stageX) && std::isfinite(stageY);
+        }
+
+        std::optional<std::int32_t> BrowserCursorSelection()
+        {
+            if (!interfaceActive.load(std::memory_order_acquire)) {
+                return std::nullopt;
+            }
+
+            float x = 0.0F;
+            float y = 0.0F;
+            float normalizedY = 0.0F;
+            if (!BrowserCursorPosition(x, y, normalizedY)) {
+                spdlog::warn(
+                    "Could not resolve the native cursor for an MMVP "
+                    "browser click");
+                return std::nullopt;
+            }
+            spdlog::info(
+                "MMVP browser click at stage ({:.1f}, {:.1f}), "
+                "projected cursor Y {:.4f}",
+                x,
+                y,
+                normalizedY);
+
+            constexpr float kSafeX{ 37.17F };
+            constexpr float kSafeWidth{ 751.66F };
+            constexpr float kButtonX{ kSafeX + 20.0F };
+            constexpr float kButtonWidth{ kSafeWidth - 40.0F };
+            if (x < kButtonX || x > kButtonX + kButtonWidth) {
+                return std::nullopt;
+            }
+
+            // The curved Pip-Boy screen applies a visibly non-linear
+            // projection. Calibrate selection boundaries from the actual
+            // MenuCursor positions observed over this SWF's four rows:
+            // Movies ~= .202, TV ~= .274, Random ~= .380-.402, Resume ~=
+            // .498. A single affine stage transform shifted each successive
+            // row upward by one.
+            constexpr float kBrowserTop{ 0.155F };
+            constexpr float kMoviesTelevisionBoundary{ 0.238F };
+            constexpr float kTelevisionRandomBoundary{ 0.327F };
+            constexpr float kRandomResumeBoundary{ 0.450F };
+            constexpr float kBrowserBottom{ 0.565F };
+            if (normalizedY < kBrowserTop ||
+                normalizedY > kBrowserBottom) {
+                return std::nullopt;
+            }
+            const std::int32_t index =
+                normalizedY < kMoviesTelevisionBoundary ? 0 :
+                normalizedY < kTelevisionRandomBoundary ? 1 :
+                normalizedY < kRandomResumeBoundary ? 2 :
+                                                           3;
+            spdlog::info(
+                "Accepted native MMVP browser click for choice {}",
+                index);
+            return index;
+        }
+
+        void ExecuteBrowserInputClick()
+        {
+            const auto now = GetTickCount64();
+            const auto previous = browserLastClickTick.exchange(
+                now,
+                std::memory_order_acq_rel);
+            if (now - previous < 120) {
+                return;
+            }
+
+            const auto reportTick =
+                browserSelectionReportTick.load(std::memory_order_acquire);
+            std::optional<std::int32_t> selection;
+            if (scaleformCommandBridgeReady.load(
+                    std::memory_order_acquire) &&
+                reportTick != 0 &&
+                now - reportTick <= 1000) {
+                selection =
+                    browserSelection.load(std::memory_order_acquire);
+                spdlog::info(
+                    "Accepted fresh MMVP Scaleform browser choice {}",
+                    *selection);
+            } else {
+                selection = BrowserCursorSelection();
+            }
+            if (selection) {
+                browserSelection.store(
+                    *selection,
+                    std::memory_order_release);
+                browserAcceptRequested.store(
+                    *selection,
+                    std::memory_order_release);
+                spdlog::info(
+                    "Queued MMVP browser Accept for SWF choice {}",
+                    *selection);
+            }
         }
 
         bool EndsWithInsensitive(
@@ -373,7 +1511,7 @@ namespace PipBoyPlayer
                 definitionVtable[kGetFileUrlVtableIndex])(movieDef);
         }
 
-        bool ScaleformCallback(void* rawView, void*)
+        bool ScaleformCallback(void* rawView, void* rawRoot)
         {
             const auto callbackNumber =
                 scaleformCallbackCount.fetch_add(
@@ -401,33 +1539,57 @@ namespace PipBoyPlayer
                 EndsWithInsensitive(
                     movieUrl,
                     "PipboyMenu.swf")) {
-                void* movieRoot = *reinterpret_cast<void**>(
-                    static_cast<std::uint8_t*>(rawView) +
-                    kMovieRootOffset);
-                pipBoyMovieRoot.store(
-                    movieRoot,
-                    std::memory_order_release);
-                pipBoyMovieView.store(
-                    rawView,
-                    std::memory_order_release);
                 spdlog::info(
-                    "Armed MMVP terminal command detection on '{}'",
+                    "Observed MMVP Pip-Boy Scaleform movie '{}'",
                     movieUrl);
                 return true;
             }
             if (movieUrl &&
                 EndsWithInsensitive(
                     movieUrl,
-                    "CursorMenu.swf")) {
-                cursorMovieView.store(
-                    rawView,
+                    "MMVPBrowser.swf")) {
+                const bool commandBridgeRegistered =
+                    RegisterCommandBridge(rawView, rawRoot);
+                scaleformCommandBridgeReady.store(
+                    commandBridgeRegistered,
                     std::memory_order_release);
-                if (active.load(std::memory_order_acquire)) {
-                    SetFalloutCursorVisible(false);
+                SetBrowserActive(true);
+                spdlog::info(
+                    "Detected active MMVP holotape browser '{}' "
+                    "(command bridge={})",
+                    movieUrl,
+                    commandBridgeRegistered);
+                return true;
+            }
+            if (movieUrl &&
+                EndsWithInsensitive(
+                    movieUrl,
+                    "CursorMenu.swf")) {
+                scaleformCommandBridgeReady.store(
+                    false,
+                    std::memory_order_release);
+                if (interfaceActive.load(std::memory_order_acquire)) {
+                    SetBrowserActive(false);
                 }
                 spdlog::info(
-                    "Captured Fallout cursor Scaleform movie '{}'",
+                    "Observed Fallout cursor Scaleform movie '{}'",
                     movieUrl);
+                return true;
+            }
+            if (movieUrl &&
+                (EndsWithInsensitive(movieUrl, "Console.swf") ||
+                 EndsWithInsensitive(movieUrl, "HUDMenu.swf") ||
+                 EndsWithInsensitive(movieUrl, "LoadingMenu.swf") ||
+                 EndsWithInsensitive(movieUrl, "MainMenu.swf"))) {
+                scaleformCommandBridgeReady.store(
+                    false,
+                    std::memory_order_release);
+                if (Active()) {
+                    Deactivate();
+                }
+                if (InterfaceActive()) {
+                    SetBrowserActive(false);
+                }
                 return true;
             }
             return true;
@@ -1010,6 +2172,17 @@ namespace PipBoyPlayer
         }
         menuCursorSingletonOffset =
             MenuCursorOffset(f4se->runtimeVersion);
+        const auto scaleformOffsets =
+            RuntimeScaleformOffsets(f4se->runtimeVersion);
+        scaleformSetMemberOffset = scaleformOffsets.setMember;
+        scaleformObjectReleaseOffset = scaleformOffsets.objectRelease;
+        if (scaleformSetMemberOffset == 0 ||
+            scaleformObjectReleaseOffset == 0) {
+            spdlog::critical(
+                "No Scaleform bridge offsets are registered for runtime {}",
+                F4SEMinimal::VersionString(f4se->runtimeVersion));
+            return false;
+        }
         if (menuCursorSingletonOffset == 0) {
             spdlog::warn(
                 "No direct MenuCursor address is registered for runtime {}; "
@@ -1029,13 +2202,27 @@ namespace PipBoyPlayer
 
     void Shutdown()
     {
-        SetFalloutCursorVisible(true);
         active.store(false, std::memory_order_release);
-        pipBoyMovieView.store(nullptr, std::memory_order_release);
-        cursorMovieView.store(nullptr, std::memory_order_release);
-        pipBoyMovieRoot.store(nullptr, std::memory_order_release);
+        interfaceActive.store(false, std::memory_order_release);
+        browserSelection.store(0, std::memory_order_release);
+        browserViewDepth.store(0, std::memory_order_release);
+        browserSelectionReportTick.store(0, std::memory_order_release);
+        browserLastClickTick.store(0, std::memory_order_release);
+        browserAcceptRequested.store(-1, std::memory_order_release);
+        browserNavigationRequested.store(0, std::memory_order_release);
+        browserBackRequested.store(false, std::memory_order_release);
+        browserProgressRefreshRequested.store(
+            false,
+            std::memory_order_release);
+        {
+            std::scoped_lock lock(continueMutex);
+            continueItems.clear();
+        }
+        suppressLegacyTabUntil.store(0, std::memory_order_release);
+        scaleformCommandBridgeReady.store(false, std::memory_order_release);
+        InputRouter::SetRawInputCapture(false);
         UpdateConsumers();
-        std::scoped_lock lock(uiMutex);
+        std::scoped_lock lock(composedMutex);
         composed = {};
     }
 
@@ -1044,87 +2231,9 @@ namespace PipBoyPlayer
         return active.load(std::memory_order_acquire);
     }
 
-    bool CommandDetectionReady() noexcept
+    bool InterfaceActive() noexcept
     {
-        return pipBoyMovieRoot.load(std::memory_order_acquire) != nullptr;
-    }
-
-    void PollScaleformCommand()
-    {
-        void* movieRoot =
-            pipBoyMovieRoot.load(std::memory_order_acquire);
-        if (!movieRoot) {
-            return;
-        }
-        void** vtable = *reinterpret_cast<void***>(movieRoot);
-        if (!vtable ||
-            !vtable[kGetVariableVtableIndex] ||
-            !vtable[kSetVariableVtableIndex]) {
-            return;
-        }
-
-        using GetVariable = bool (*)(
-            void*,
-            ScaleformValue*,
-            const char*);
-        const auto getVariable = reinterpret_cast<GetVariable>(
-            vtable[kGetVariableVtableIndex]);
-        ScaleformValue command{};
-        if (!getVariable(
-                movieRoot,
-                &command,
-                kCommandPath.data())) {
-            return;
-        }
-
-        std::int32_t commandId = 0;
-        switch (command.type & kScaleformTypeMask) {
-        case 2:
-            commandId = command.value != 0 ? 1 : 0;
-            break;
-        case 3:
-            commandId = static_cast<std::int32_t>(
-                static_cast<std::uint32_t>(command.value));
-            break;
-        case 4:
-            commandId = static_cast<std::int32_t>(
-                static_cast<std::uint32_t>(command.value));
-            break;
-        case 5:
-            commandId = static_cast<std::int32_t>(
-                std::bit_cast<double>(command.value));
-            break;
-        default:
-            return;
-        }
-        if (commandId != 1 && commandId != 2) {
-            return;
-        }
-
-        ScaleformValue reset{};
-        reset.type = 3;
-        using SetVariable = bool (*)(
-            void*,
-            const char*,
-            const ScaleformValue*,
-            std::uint32_t);
-        const auto setVariable = reinterpret_cast<SetVariable>(
-            vtable[kSetVariableVtableIndex]);
-        if (!setVariable(
-                movieRoot,
-                kCommandPath.data(),
-                &reset,
-                0)) {
-            spdlog::warn(
-                "Could not clear Pip-Boy terminal command {}",
-                commandId);
-            return;
-        }
-
-        ActivateRandom(
-            commandId == 1 ?
-                PlaybackChannel::kProjector :
-                PlaybackChannel::kTelevision);
+        return interfaceActive.load(std::memory_order_acquire);
     }
 
     void Activate()
@@ -1134,10 +2243,12 @@ namespace PipBoyPlayer
 
     void Deactivate()
     {
-        if (!active.exchange(false, std::memory_order_acq_rel)) {
+        const bool wasActive =
+            active.exchange(false, std::memory_order_acq_rel);
+        InputRouter::SetRawInputCapture(InterfaceActive());
+        if (!wasActive) {
             return;
         }
-        SetFalloutCursorVisible(true);
         UpdateConsumers();
         spdlog::info("MMVP Pip-Boy video program deactivated");
     }
@@ -1147,14 +2258,88 @@ namespace PipBoyPlayer
         const WPARAM wParam,
         const LPARAM lParam)
     {
-        if (!Active()) {
+        if ((message == WM_KEYDOWN ||
+             message == WM_SYSKEYDOWN ||
+             message == WM_KEYUP ||
+             message == WM_SYSKEYUP) &&
+            wParam == VK_TAB) {
+            const auto suppressUntil =
+                suppressLegacyTabUntil.load(std::memory_order_acquire);
+            if (suppressUntil != 0 &&
+                GetTickCount64() <= suppressUntil) {
+                if (message == WM_KEYUP || message == WM_SYSKEYUP) {
+                    suppressLegacyTabUntil.store(
+                        0,
+                        std::memory_order_release);
+                }
+                return true;
+            }
+        }
+
+        const bool playerActive = Active();
+        const bool browserActive = InterfaceActive();
+        if (!playerActive && !browserActive) {
             return false;
         }
 
-        if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) &&
-            (wParam == VK_TAB || wParam == VK_ESCAPE)) {
-            Deactivate();
-            return false;
+        const auto isBrowserNavigationKey = [](const USHORT key) {
+            return key == VK_UP ||
+                   key == VK_DOWN ||
+                   key == VK_LEFT ||
+                   key == VK_RIGHT ||
+                   key == VK_RETURN ||
+                   key == VK_SPACE;
+        };
+
+        if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
+            if (wParam == VK_TAB) {
+                if (playerActive) {
+                    // The native player is an interim overlay over the still
+                    // loaded browser SWF. First Tab removes only that overlay
+                    // and returns input ownership to the browser. A later Tab
+                    // reaches Fallout and closes the holotape program.
+                    suppressLegacyTabUntil.store(
+                        GetTickCount64() + 250,
+                        std::memory_order_release);
+                    Deactivate();
+                    browserProgressRefreshRequested.store(
+                        true,
+                        std::memory_order_release);
+                    SetBrowserActive(true, false);
+                    return true;
+                }
+                if (browserViewDepth.load(
+                        std::memory_order_acquire) > 0 &&
+                    scaleformCommandBridgeReady.load(
+                        std::memory_order_acquire)) {
+                    suppressLegacyTabUntil.store(
+                        GetTickCount64() + 250,
+                        std::memory_order_release);
+                    browserBackRequested.store(
+                        true,
+                        std::memory_order_release);
+                    return true;
+                }
+                SetBrowserActive(false);
+                // Match Holo-Wind's proven eject path: after releasing MMVP's
+                // raw-input ownership, let Fallout receive both the normal
+                // Tab message and its raw event. PipboyHolotapeMenu then runs
+                // its native ProcessCancel/eject behavior.
+                return false;
+            }
+            if (browserActive) {
+                if (isBrowserNavigationKey(
+                        static_cast<USHORT>(wParam))) {
+                    return true;
+                }
+            }
+            return true;
+        }
+        if (message == WM_KEYUP || message == WM_SYSKEYUP) {
+            if (wParam == VK_TAB) {
+                return false;
+            }
+            return true;
         }
         if (message == WM_INPUT) {
             UINT size = 0;
@@ -1174,9 +2359,124 @@ namespace PipBoyPlayer
                         sizeof(RAWINPUTHEADER)) == size) {
                     const auto* raw =
                         reinterpret_cast<const RAWINPUT*>(data.data());
+                    if (raw->header.dwType == RIM_TYPEKEYBOARD) {
+                        const auto& keyboard = raw->data.keyboard;
+                        if ((keyboard.Flags & RI_KEY_BREAK) != 0) {
+                            return true;
+                        }
+                        const USHORT key = keyboard.VKey;
+                        if (key == VK_TAB) {
+                            const auto now = GetTickCount64();
+                            const auto suppressUntil =
+                                suppressLegacyTabUntil.load(
+                                    std::memory_order_acquire);
+                            if (suppressUntil != 0 &&
+                                now <= suppressUntil) {
+                                return true;
+                            }
+                            if (playerActive) {
+                                suppressLegacyTabUntil.store(
+                                    now + 250,
+                                    std::memory_order_release);
+                                Deactivate();
+                                browserProgressRefreshRequested.store(
+                                    true,
+                                    std::memory_order_release);
+                                SetBrowserActive(true, false);
+                                return true;
+                            }
+                            if (browserViewDepth.load(
+                                    std::memory_order_acquire) > 0 &&
+                                scaleformCommandBridgeReady.load(
+                                    std::memory_order_acquire)) {
+                                suppressLegacyTabUntil.store(
+                                    now + 250,
+                                    std::memory_order_release);
+                                browserBackRequested.store(
+                                    true,
+                                    std::memory_order_release);
+                                return true;
+                            }
+                            SetBrowserActive(false);
+                            // Holo-Wind passes Tab through in both raw and
+                            // legacy form so Fallout's holotape menu performs
+                            // its normal eject. Do the same after cleanup.
+                            return false;
+                        }
+                        if (browserActive &&
+                            (key == VK_UP || key == 'W')) {
+                            browserNavigationRequested.fetch_sub(
+                                1,
+                                std::memory_order_release);
+                            return true;
+                        }
+                        if (browserActive &&
+                            (key == VK_DOWN || key == 'S')) {
+                            browserNavigationRequested.fetch_add(
+                                1,
+                                std::memory_order_release);
+                            return true;
+                        }
+                        if (browserActive &&
+                            (key == VK_LEFT || key == 'A')) {
+                            browserNavigationRequested.fetch_sub(
+                                10,
+                                std::memory_order_release);
+                            return true;
+                        }
+                        if (browserActive &&
+                            (key == VK_RIGHT || key == 'D')) {
+                            browserNavigationRequested.fetch_add(
+                                10,
+                                std::memory_order_release);
+                            return true;
+                        }
+                        if (browserActive &&
+                            (key == VK_RETURN || key == VK_SPACE)) {
+                            browserAcceptRequested.store(
+                                browserSelection.load(
+                                    std::memory_order_acquire),
+                                std::memory_order_release);
+                            return true;
+                        }
+                        // Fallout's raw event is always consumed while MMVP
+                        // owns input. Selected legacy WM_KEYDOWN messages are
+                        // independently allowed to reach Scaleform above.
+                        // Forwarding both paths made every arrow move twice
+                        // and let raw Tab close the entire Pip-Boy.
+                        return true;
+                    }
                     if (raw->header.dwType == RIM_TYPEMOUSE) {
-                        if ((raw->data.mouse.usButtonFlags &
+                        if (browserActive &&
+                            (raw->data.mouse.usButtonFlags &
+                             RI_MOUSE_WHEEL) != 0) {
+                            const auto wheelDelta = static_cast<SHORT>(
+                                raw->data.mouse.usButtonData);
+                            browserNavigationRequested.fetch_add(
+                                wheelDelta > 0 ? -1 : 1,
+                                std::memory_order_release);
+                            return true;
+                        }
+                        if (browserActive &&
+                            (raw->data.mouse.usButtonFlags &
                              RI_MOUSE_LEFT_BUTTON_DOWN) != 0) {
+                            // Fallout/Proton does not deliver either the
+                            // browser's complete Flash CLICK sequence while
+                            // raw input is owned. Prefer the SWF's freshly
+                            // reported exact hover selection; resolve the live
+                            // MenuCursor only when no fresh report exists.
+                            ExecuteBrowserInputClick();
+                            return true;
+                        }
+                        if (playerActive &&
+                            (raw->data.mouse.usButtonFlags &
+                             RI_MOUSE_LEFT_BUTTON_DOWN) != 0) {
+                            if (GetTickCount64() -
+                                    browserLastClickTick.load(
+                                        std::memory_order_acquire) <
+                                200) {
+                                return true;
+                            }
                             ExecuteClick();
                             // Fallout consumes raw mouse buttons as Pip-Boy
                             // UI clicks. Keep player clicks out of that path.
@@ -1187,10 +2487,27 @@ namespace PipBoyPlayer
             }
             return false;
         }
-        if (message == WM_LBUTTONDOWN) {
+        if (browserActive && message == WM_MOUSEWHEEL) {
+            // Raw mouse-wheel input above owns navigation; suppress its
+            // legacy duplicate so one detent moves exactly one row.
+            return true;
+        }
+        if (browserActive && message == WM_LBUTTONDOWN) {
+            ExecuteBrowserInputClick();
+            return true;
+        }
+        if (playerActive && message == WM_LBUTTONDOWN) {
+            if (GetTickCount64() -
+                    browserLastClickTick.load(std::memory_order_acquire) <
+                200) {
+                return true;
+            }
             ExecuteClick();
             // The video controls sit over the live Pip-Boy menu. Do not let
             // this click activate whichever vanilla control is underneath.
+            return true;
+        }
+        if (message == WM_CHAR || message == WM_SYSCHAR) {
             return true;
         }
         return false;
@@ -1239,34 +2556,7 @@ namespace PipBoyPlayer
             }
         }
         if (!directCursor) {
-            void* movieView =
-                cursorMovieView.load(std::memory_order_acquire);
-            if (!movieView) {
-                movieView =
-                    pipBoyMovieView.load(std::memory_order_acquire);
-            }
-            if (!movieView) {
-                return;
-            }
-            void** vtable = *reinterpret_cast<void***>(movieView);
-            if (!vtable || !vtable[kGetMouseStateVtableIndex]) {
-                return;
-            }
-
-            std::uint32_t buttons = 0;
-            using GetMouseState = void (*)(
-                void*,
-                std::uint32_t,
-                float*,
-                float*,
-                std::uint32_t*);
-            reinterpret_cast<GetMouseState>(
-                vtable[kGetMouseStateVtableIndex])(
-                movieView,
-                0,
-                &movieX,
-                &movieY,
-                &buttons);
+            return;
         }
         if (!std::isfinite(movieX) || !std::isfinite(movieY)) {
             return;
@@ -1330,7 +2620,14 @@ namespace PipBoyPlayer
             channel = ui.channel;
         }
         auto* player = PlayerFor(channel);
-        const auto source = player ? player->LatestFrame() : nullptr;
+        auto source = player ? player->LatestFrame() : nullptr;
+        if (source && source->channel != channel) {
+            spdlog::error(
+                "Rejected a {} frame while composing the {} Pip-Boy channel",
+                PlaybackChannelName(source->channel),
+                PlaybackChannelName(channel));
+            source.reset();
+        }
         const auto snapshot = player ?
             player->Snapshot() :
             PlaybackSnapshot{};
@@ -1343,6 +2640,7 @@ namespace PipBoyPlayer
                         0.0,
                         1.0) * 1000.0) :
                 0;
+        std::scoped_lock composedLock(composedMutex);
         const bool needsCompose =
             composed.width != descriptor.Width ||
             composed.height != descriptor.Height ||

@@ -3,6 +3,13 @@
 class MediaLibrary
 {
 public:
+    struct Item
+    {
+        std::string id;
+        std::string displayName;
+        std::string relativePath;
+    };
+
     explicit MediaLibrary(
         std::filesystem::path root = {},
         bool recursive = true);
@@ -13,6 +20,10 @@ public:
     [[nodiscard]] bool Recursive() const noexcept;
 
     [[nodiscard]] std::vector<std::filesystem::path> Scan() const;
+    [[nodiscard]] std::vector<std::filesystem::path>
+        ScanAudioSources() const;
+    [[nodiscard]] std::vector<Item> Catalog(
+        const std::vector<std::filesystem::path>& media) const;
     [[nodiscard]] std::optional<std::filesystem::path> Resolve(
         std::string_view mediaId) const;
     [[nodiscard]] std::string MediaId(
@@ -20,8 +31,15 @@ public:
 
     [[nodiscard]] static bool IsSupported(
         const std::filesystem::path& path);
+    [[nodiscard]] static bool IsAudioSourceSupported(
+        const std::filesystem::path& path);
 
 private:
+    [[nodiscard]] std::vector<std::filesystem::path> ScanMatching(
+        bool audioSources) const;
+    [[nodiscard]] std::string RelativePath(
+        const std::filesystem::path& path) const;
+
     std::filesystem::path root_;
     bool recursive_{ true };
 };

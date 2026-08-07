@@ -11,8 +11,7 @@ namespace PipBoyPlayer
     void Shutdown();
 
     [[nodiscard]] bool Active() noexcept;
-    [[nodiscard]] bool CommandDetectionReady() noexcept;
-    void PollScaleformCommand();
+    [[nodiscard]] bool InterfaceActive() noexcept;
     void Activate();
     void Deactivate();
     void TickPointer();

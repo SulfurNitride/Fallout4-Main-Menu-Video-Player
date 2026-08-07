@@ -25,11 +25,17 @@ namespace Serialization
         constexpr std::uint32_t kRecordType{
             FourCC('S', 'T', 'A', 'T')
         };
-        constexpr std::uint32_t kRecordVersion{ 1 };
+        constexpr std::uint32_t kRecordVersion1{ 1 };
+        constexpr std::uint32_t kRecordVersion2{ 2 };
+        constexpr std::uint32_t kCurrentRecordVersion{ kRecordVersion2 };
         constexpr std::uint32_t kMaximumRecordSize{ 1024 * 1024 };
-        constexpr std::uint32_t kPayloadMagic{
+        constexpr std::uint32_t kPayloadMagic1{
             FourCC('M', 'V', 'P', '1')
         };
+        constexpr std::uint32_t kPayloadMagic2{
+            FourCC('M', 'V', 'P', '2')
+        };
+        constexpr std::uint32_t kMaximumProgressEntries{ 4096 };
 
         std::uint32_t pluginHandle{ 0 };
 
@@ -110,6 +116,23 @@ namespace Serialization
             AppendString(output, snapshot.mediaId);
         }
 
+        void AppendProgress(
+            std::vector<std::uint8_t>& output,
+            const PlaybackChannel channel,
+            const MediaProgress& progress)
+        {
+            const auto rawChannel = static_cast<std::uint8_t>(channel);
+            const std::uint8_t completed = progress.completed ? 1 : 0;
+            const std::uint16_t reserved = 0;
+            Append(output, rawChannel);
+            Append(output, completed);
+            Append(output, reserved);
+            Append(output, progress.positionSeconds);
+            Append(output, progress.durationSeconds);
+            Append(output, progress.lastPlayedMilliseconds);
+            AppendString(output, progress.mediaId);
+        }
+
         bool ReadSnapshot(
             const std::vector<std::uint8_t>& input,
             std::size_t& offset)
@@ -159,6 +182,43 @@ namespace Serialization
             return true;
         }
 
+        bool ReadProgress(
+            const std::vector<std::uint8_t>& input,
+            std::size_t& offset,
+            PlaybackChannel& channel,
+            MediaProgress& progress)
+        {
+            std::uint8_t rawChannel = 0;
+            std::uint8_t completed = 0;
+            std::uint16_t reserved = 0;
+            if (!Read(input, offset, rawChannel) ||
+                !Read(input, offset, completed) ||
+                !Read(input, offset, reserved) ||
+                !Read(input, offset, progress.positionSeconds) ||
+                !Read(input, offset, progress.durationSeconds) ||
+                !Read(
+                    input,
+                    offset,
+                    progress.lastPlayedMilliseconds) ||
+                !ReadString(input, offset, progress.mediaId)) {
+                return false;
+            }
+
+            if (rawChannel ==
+                static_cast<std::uint8_t>(
+                    PlaybackChannel::kTelevision)) {
+                channel = PlaybackChannel::kTelevision;
+            } else if (rawChannel ==
+                       static_cast<std::uint8_t>(
+                           PlaybackChannel::kProjector)) {
+                channel = PlaybackChannel::kProjector;
+            } else {
+                progress.mediaId.clear();
+            }
+            progress.completed = completed != 0;
+            return true;
+        }
+
         void DiscardRecord(
             const F4SEMinimal::SerializationInterface* interface,
             std::uint32_t length)
@@ -187,8 +247,8 @@ namespace Serialization
             }
 
             std::vector<std::uint8_t> payload;
-            payload.reserve(512);
-            Append(payload, kPayloadMagic);
+            payload.reserve(4096);
+            Append(payload, kPayloadMagic2);
             const std::uint32_t count = 2;
             Append(payload, count);
             AppendSnapshot(
@@ -200,13 +260,49 @@ namespace Serialization
                 PlaybackChannel::kProjector,
                 playback.Projector()->Snapshot());
 
+            auto televisionHistory =
+                playback.Television()->ProgressHistory();
+            auto projectorHistory =
+                playback.Projector()->ProgressHistory();
+            const auto historyCount = static_cast<std::uint32_t>(
+                std::min<std::size_t>(
+                    televisionHistory.size() + projectorHistory.size(),
+                    kMaximumProgressEntries));
+            Append(payload, historyCount);
+            std::uint32_t written = 0;
+            for (const auto& progress : televisionHistory) {
+                if (written >= historyCount) {
+                    break;
+                }
+                AppendProgress(
+                    payload,
+                    PlaybackChannel::kTelevision,
+                    progress);
+                ++written;
+            }
+            for (const auto& progress : projectorHistory) {
+                if (written >= historyCount) {
+                    break;
+                }
+                AppendProgress(
+                    payload,
+                    PlaybackChannel::kProjector,
+                    progress);
+                ++written;
+            }
+
             if (!interface->WriteRecord(
                     kRecordType,
-                    kRecordVersion,
+                    kCurrentRecordVersion,
                     payload.data(),
                     static_cast<std::uint32_t>(payload.size()))) {
                 spdlog::error(
                     "F4SE could not save MMVP playback state");
+            } else {
+                spdlog::debug(
+                    "Saved {} MMVP media progress entr{}",
+                    historyCount,
+                    historyCount == 1 ? "y" : "ies");
             }
         }
 
@@ -221,7 +317,8 @@ namespace Serialization
                 &version,
                 &length)) {
                 if (type != kRecordType ||
-                    version != kRecordVersion ||
+                    (version != kRecordVersion1 &&
+                     version != kRecordVersion2) ||
                     length < sizeof(std::uint32_t) * 2 ||
                     length > kMaximumRecordSize) {
                     DiscardRecord(interface, length);
@@ -242,7 +339,10 @@ namespace Serialization
                 std::uint32_t count = 0;
                 if (!Read(payload, offset, magic) ||
                     !Read(payload, offset, count) ||
-                    magic != kPayloadMagic ||
+                    ((version == kRecordVersion1 &&
+                      magic != kPayloadMagic1) ||
+                     (version == kRecordVersion2 &&
+                      magic != kPayloadMagic2)) ||
                     count > 8) {
                     spdlog::warn(
                         "Ignored an invalid MMVP state record");
@@ -257,6 +357,62 @@ namespace Serialization
                         break;
                     }
                 }
+
+                if (version == kRecordVersion2) {
+                    std::uint32_t historyCount = 0;
+                    if (!Read(payload, offset, historyCount) ||
+                        historyCount > kMaximumProgressEntries) {
+                        spdlog::warn(
+                            "Ignored invalid MMVP progress history");
+                        continue;
+                    }
+
+                    std::vector<MediaProgress> televisionHistory;
+                    std::vector<MediaProgress> projectorHistory;
+                    bool complete = true;
+                    for (std::uint32_t index = 0;
+                         index < historyCount;
+                         ++index) {
+                        PlaybackChannel channel{
+                            PlaybackChannel::kTelevision
+                        };
+                        MediaProgress progress;
+                        if (!ReadProgress(
+                                payload,
+                                offset,
+                                channel,
+                                progress)) {
+                            complete = false;
+                            break;
+                        }
+                        if (progress.mediaId.empty()) {
+                            continue;
+                        }
+                        (channel == PlaybackChannel::kTelevision ?
+                             televisionHistory :
+                             projectorHistory)
+                            .push_back(std::move(progress));
+                    }
+                    if (!complete) {
+                        spdlog::warn(
+                            "MMVP progress history ended unexpectedly");
+                        continue;
+                    }
+
+                    auto& playback = WorldPlayback::GetSingleton();
+                    if (auto* television = playback.Television()) {
+                        television->RestoreProgressHistory(
+                            std::move(televisionHistory));
+                    }
+                    if (auto* projector = playback.Projector()) {
+                        projector->RestoreProgressHistory(
+                            std::move(projectorHistory));
+                    }
+                    spdlog::info(
+                        "Restored {} MMVP media progress entr{}",
+                        historyCount,
+                        historyCount == 1 ? "y" : "ies");
+                }
             }
         }
 
@@ -265,12 +421,14 @@ namespace Serialization
         {
             auto& playback = WorldPlayback::GetSingleton();
             if (auto* television = playback.Television()) {
+                television->ClearProgressHistory();
                 television->Stop();
                 television->SetLoop(false);
                 television->RefreshLibrary();
                 television->Play();
             }
             if (auto* projector = playback.Projector()) {
+                projector->ClearProgressHistory();
                 projector->Stop();
                 projector->SetLoop(false);
                 projector->RefreshLibrary();

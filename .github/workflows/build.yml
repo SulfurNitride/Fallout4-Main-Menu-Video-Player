@@ -128,20 +128,27 @@ jobs:
             "fomod\info.xml",
             "fomod\ModuleConfig.xml",
             "common\F4SE\Plugins\MainMenuVideoPlayer.ini",
-            "common\MMVP_WorldScreens.esp",
-            "common\Scripts\MMVP\HolotapeQuest.pex",
-            "common\Scripts\Fragments\Terminals\TERM_MMVP_PlayerTerminal_00000808.pex",
-            "common\Meshes\MMVP\TelevisionWorkshopVariant01.nif",
-            "common\Meshes\MMVP\TelevisionWorkshopVariant02.nif",
-            "common\Meshes\MMVP\FilmProjector.nif",
-            "common\Meshes\MMVP\MovieScreen.nif",
-            "common\Materials\MMVP\World\MovieScreenProjectionSurface_BillboardSignDefault01ReplacementMMVP.BGSM",
-            "common\Textures\MMVP\World\TelevisionScreenOutput1_d.dds",
-            "common\Textures\MMVP\World\MovieProjectorScreenOutput00001_d.dds",
+            "common\MainMenuAudio\README.txt",
             "common\Video\MainMenuLoop.bk2",
+            "experimental\MMVP_WorldScreens.esp",
+            "experimental\TVVideos\README.txt",
+            "experimental\MovieVideos\README.txt",
+            "experimental\Programs\MMVPBrowser.swf",
+            "experimental\Programs\MMVPPlayer.swf",
+            "experimental\Scripts\MMVP\HolotapeQuest.pex",
+            "experimental\Meshes\MMVP\TelevisionWorkshopVariant01.nif",
+            "experimental\Meshes\MMVP\TelevisionWorkshopVariant02.nif",
+            "experimental\Meshes\MMVP\FilmProjector.nif",
+            "experimental\Meshes\MMVP\MovieScreen.nif",
+            "experimental\Materials\MMVP\World\MovieScreenProjectionSurface_BillboardSignDefault01ReplacementMMVP.BGSM",
+            "experimental\Textures\MMVP\World\TelevisionScreenOutput1_d.dds",
+            "experimental\Textures\MMVP\World\MovieProjectorScreenOutput00001_d.dds",
             "runtime\OG\F4SE\Plugins\MainMenuVideoPlayer.dll",
             "runtime\NG\F4SE\Plugins\MainMenuVideoPlayer.dll",
-            "runtime\AE\F4SE\Plugins\MainMenuVideoPlayer.dll"
+            "runtime\AE\F4SE\Plugins\MainMenuVideoPlayer.dll",
+            "legal\LICENSE",
+            "legal\THIRD_PARTY_NOTICES.txt",
+            "legal\licenses\FFmpeg-LGPL-2.1.txt"
           )
 
           foreach ($relativePath in $required) {
@@ -150,6 +157,27 @@ jobs:
               throw "Missing required package file: $relativePath"
             }
           }
+
+          $forbiddenCoreFiles = @(
+            "common\MMVP_WorldScreens.esp",
+            "common\Scripts\MMVP\HolotapeQuest.pex",
+            "common\Programs\MMVPBrowser.swf",
+            "common\Programs\MMVPPlayer.swf",
+            "common\TVVideos\README.txt",
+            "common\MovieVideos\README.txt",
+            "common\LICENSE",
+            "common\THIRD_PARTY_NOTICES.txt",
+            "common\licenses\FFmpeg-LGPL-2.1.txt"
+          )
+          foreach ($relativePath in $forbiddenCoreFiles) {
+            if (Test-Path (Join-Path $expanded $relativePath)) {
+              throw "Experimental file leaked into required core: $relativePath"
+            }
+          }
+
+          python scripts\validate-interface-swfs.py `
+            (Join-Path $expanded "experimental\Programs\MMVPBrowser.swf") `
+            (Join-Path $expanded "experimental\Programs\MMVPPlayer.swf")
 
           [xml](Get-Content (Join-Path $expanded "fomod\info.xml")) | Out-Null
           [xml](Get-Content (Join-Path $expanded "fomod\ModuleConfig.xml")) | Out-Null

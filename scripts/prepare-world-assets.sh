@@ -27,4 +27,4 @@ trap 'rm -rf "${ASSET_WORK_DIR}"' EXIT
 python3 "${PROJECT_DIR}/tools/prepare_world_assets.py" \
     --mesh-root "${ASSET_WORK_DIR}/meshes" \
     --material-root "${ASSET_WORK_DIR}/materials" \
-    --output-root "${PROJECT_DIR}/package/common"
+    --output-root "${PROJECT_DIR}/package/experimental"

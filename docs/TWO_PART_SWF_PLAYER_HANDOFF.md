@@ -3,20 +3,24 @@
 ## Purpose and current baseline
 
 This document is the starting point for the next development conversation. The
-goal is to replace the temporary two-option terminal picker with one shared
-two-part Scaleform interface. The same browser/player pair must work from the
-Pip-Boy and as the interaction menu for craftable televisions, projectors, and
-video terminals. It must do this without replacing Fallout 4's
+goal is to replace the temporary two-option picker with one shared two-part
+Scaleform interface. The same holotape browser/player pair must work from the
+Pip-Boy and any vanilla terminal that exposes **Load Holotape**, then serve as
+the interaction menu for craftable televisions and projectors. It must do this
+without replacing Fallout 4's
 `PipboyMenu.swf` or assuming one fixed Pip-Boy or world-screen model.
 
-Version 0.1.1 is the working baseline:
+Version 0.1.2 is the working baseline:
 
 - The holotape is added to the player's inventory by a start-game-enabled
   quest.
-- Its vanilla terminal offers random Movie and TV playback.
+- Its holotape program offers direct Movie and TV browsing.
 - The native DLL scans `Data/MovieVideos` and `Data/TVVideos`, decodes ordinary
   video formats, uploads frames to the active Pip-Boy render target, and plays
   audio through XAudio.
+- Those two library folders are included only by the experimental FOMOD
+  option. The recommended main-menu-only installation creates only
+  `Data/MainMenuVideos` and `Data/MainMenuAudio`.
 - The native overlay has seek, previous, play/pause, next, and stop controls.
 - The projected green cursor follows the full-screen Fallout cursor closely
   enough for current use. The flat `CursorMenu` cursor is hidden only while the
@@ -26,12 +30,85 @@ Version 0.1.1 is the working baseline:
   paused state, and loop state.
 - Main-menu playback, BK2 carrier switching, and XWM sidecars are separate from
   this work and must continue to function.
+- Main-menu playback automatically chooses a looping, no-repeat soundtrack
+  when `Data/MainMenuAudio` contains supported media. N advances that
+  soundtrack and M switches exclusively between dedicated and original video
+  audio.
 - Craftable TV/projector records and native world-texture code exist as disabled
-  development stubs. Version 0.1.1 does not expose their interaction menu.
+  development stubs. Version 0.1.2 does not expose their interaction menu.
 
-There is no production SWF in 0.1.1. Any tiny generated
-`MMVPVideoPlayer.swf` found under an old build directory is a discarded marker,
-not a player and not a package input.
+Version 0.1.2 packages `MMVPBrowser.swf` and `MMVPPlayer.swf` only with the
+explicitly experimental FOMOD option. Any tiny generated `MMVPVideoPlayer.swf`
+found under an old build directory is a discarded marker, not a player and not
+a package input.
+
+### Development checkpoint: 2026-08-07
+
+The opt-in holotape now launches a real pure-AS3 `MMVPBrowser.swf` and the
+repository also builds `MMVPPlayer.swf`. Both are SWF 10 / ABC 46, use an
+826x700 stage at 60 fps, load Bethesda's terminal font library, and pass the
+offline validator. The browser has a Scaleform-owned cursor and four launch
+choices wired to native commands.
+
+This checkpoint deliberately connects those choices to the existing native
+Pip-Boy player before attempting the external-image player design:
+
+- Movies and Television open real, sorted four-item media pages. Left/Right
+  changes page; Up/Down, W/S, and the mouse wheel move continuously through
+  rows and cross page boundaries. Back returns to the category screen, and
+  selecting a row plays that exact native media item.
+- Random selects either native channel.
+- Resume reactivates the selected native session.
+- Loading `MMVPBrowser.swf` directly activates a native, holotape-scoped input
+  lock. Tab, browser teardown, and player activation release that browser state.
+- The F4SE Scaleform plugin object now exposes real `getApiVersion` and
+  `playCommand`, `setSelection`, and `consumeBackRequest` function objects.
+  `MMVPBrowser` explicitly declares its `f4se` root slot because AS3 document
+  classes are sealed; without that declaration F4SE could build the native
+  plugin object but could not expose it to this SWF's ActionScript. The SWF now
+  reports its exact hover/keyboard selection through that bridge, and raw
+  button-down accepts a report only when it is fresh. If Fallout/Proton omits
+  mouse movement as well as the complete Flash `CLICK` sequence, button-down
+  falls back to calibrated native cursor bands. The curved screen projection
+  is non-linear: treating the stage as the full desktop cursor range compresses
+  every visible row toward Movies, while one affine transform still shifts
+  successive rows upward.
+- Catalog entries use an opaque 128-bit lowercase hexadecimal ID derived from
+  the normalized category-relative path and file size. Only a few hundred
+  bytes are hashed per item; video contents are never scanned at startup.
+  Version-1 relative-path save IDs remain resolvable for compatibility.
+- The bridge API is version 2 and adds `refreshMedia`, `getMediaCount`,
+  `getMediaId`, `getMediaLabel`, `playMedia`, and
+  `consumeAcceptRequest`. The current SWF fetches catalog metadata on category
+  entry and pages it locally in groups of four. Raw navigation is relayed
+  through `consumeNavigationRequest` so Fallout/Proton cannot drop it or cause
+  the former raw-plus-legacy double movement.
+- Browser Tab follows Holo-Wind's exact tested behavior: MMVP first releases
+  playback and raw-input ownership, then passes both the legacy Tab message and
+  raw Tab event through to Fallout. `PipboyHolotapeMenu` performs its native
+  cancel/eject behavior. A short one-transition latch is used only when the
+  first Tab returns from the native player overlay to the browser, preventing
+  that same physical key press from also ejecting the browser.
+- Never retain and poll the loaded program movie's private root: Fallout may
+  invalidate that object while the containing Pip-Boy menu remains alive.
+- Do not retain `CursorMenu` or another auxiliary movie view either. Fallout
+  replaces those views during menu transitions. The tested runtime's direct
+  `MenuCursor` state is the only native-player pointer source; cursor hiding is
+  deferred until it can use a lifetime-safe menu API.
+- The obsolete terminal `UI.Set` polling path is disabled in the opt-in browser
+  checkpoint. It retained `PipboyMenu`'s private movie root across Tab teardown
+  and could race the render thread. Browser lifecycle, input, and launch choices
+  now require no retained Scaleform pointers.
+
+Project Holo-Wind demonstrated why ActionScript return values alone cannot
+prevent gameplay movement: its launcher subclasses Fallout's window procedure,
+handles raw keyboard/mouse input, forwards what its external runtime needs, and
+returns zero for input Fallout must not receive. MMVP uses that interception
+only after its browser movie is loaded or its native player is active. Main
+menu and console input therefore stay on Fallout's normal path. Browser Tab is
+passed through for Fallout's native holotape eject; gameplay keys are consumed.
+This remains an interim bridge to the native overlay; decoded frames are not
+yet exposed as `img://MMVPVideo` inside `MMVPPlayer.swf`.
 
 ## Required user experience
 
@@ -51,10 +128,13 @@ Pip-Boy Inventory
   -> Back again returns to the normal Pip-Boy
 ```
 
-The browser and player are separate programs loaded through the vanilla
-holotape-program container. Neither SWF should force itself onto the whole
-Pip-Boy menu or patch a base-game SWF. Loading and unloading them through the
-normal program lifecycle is what prevents a blank or inescapable Pip-Boy.
+The browser and player are separate compiled SWFs, but the holotape record
+launches only `MMVPBrowser.swf` as its root program. The browser dynamically
+loads and unloads `MMVPPlayer.swf` as a child, following the same pattern used
+by Bethesda holotape programs that load secondary asset SWFs. Neither SWF
+should force itself onto the whole Pip-Boy menu or patch a base-game SWF.
+Keeping one root program alive while switching between its browser and player
+views prevents a blank or inescapable Pip-Boy.
 
 The world-object flow should use the same pair:
 
@@ -65,7 +145,7 @@ Activate a placed MMVP object
       -> TV
       -> Random
       -> Resume this screen
-      -> Choose/Pair Screen, when the object is a projector or terminal
+      -> Choose/Pair Screen, when the object is a projector
   -> MMVPPlayer.swf
       -> controls the video playing on the selected world output
       -> Back returns to MMVPBrowser.swf
@@ -74,8 +154,9 @@ Activate a placed MMVP object
 
 The SWFs are not separate Pip-Boy-only and workshop-only interfaces. They are
 one responsive UI with a native launch context. The context tells them whether
-they are controlling the Pip-Boy, a television, a projector and paired movie
-screen, or a video terminal. Labels and available actions can change from that
+the program is hosted by the Pip-Boy or a vanilla terminal and whether it is
+controlling a television or a projector with a paired movie screen. Labels and
+available actions can change from that
 context while browsing, playback controls, and visual style stay consistent.
 
 ## Surface context and world interaction
@@ -84,7 +165,8 @@ Every browser session must begin with an explicit output target:
 
 ```text
 targetId
-targetKind = PipBoy | Television | Projector | MovieScreen | Terminal
+hostKind = PipBoy | VanillaTerminal | WorldMenu
+targetKind = PipBoy | TerminalDisplay | Television | Projector | MovieScreen
 targetName
 targetReferenceId
 controllerReferenceId
@@ -107,16 +189,16 @@ Expected behavior by object:
   nearby compatible screens and clearly reports that pairing is required.
 - **Movie screen:** Activating a screen may open the menu for its paired
   projector or offer compatible nearby projectors when unpaired.
-- **Video terminal:** Activating the craftable MMVP terminal opens the shared
-  menu. It can control its currently selected TV/projector/screen, offer a
-  target picker, and optionally use its own display if its model has a suitable
-  video surface.
+- **Vanilla terminal:** Use Fallout's normal **Load Holotape** flow to launch
+  the same MMVP program. MMVP adds no custom terminal or terminal recipe. Do
+  not close `TerminalMenu` from a Papyrus fragment: that strands the player in
+  the physical terminal interaction with no menu owning its exit path.
 
 Pairing should be explicit and saved. A nearest-screen search is useful for the
 initial suggestion, but playback must not silently jump to a different screen
-when workshop objects are moved. Store projector-to-screen and
-terminal-to-output relationships by placed reference ID, validate them on
-load, and ask the user to repair a missing pairing.
+when workshop objects are moved. Store projector-to-screen relationships by
+placed reference ID, validate them on load, and ask the user to repair a
+missing pairing.
 
 The custom menu is only a controller for world playback. Closing it must not
 automatically stop a television or projector unless the user chooses Stop.
@@ -141,16 +223,19 @@ menu. The native plugin should register a proper custom-menu host and load the
 same SWF assets with a world target context. It must not replace a vanilla
 workshop, terminal, or activation menu.
 
-Both SWFs should lay themselves out from the actual Stage dimensions. Controls
-need a configurable safe-area inset so curved or unusually cropped custom
-screens remain usable. The DLL should continue discovering the real D3D render
-target and report its dimensions instead of treating the INI values as the
-authoritative size. The INI dimensions can remain a diagnostic fallback.
+Both SWFs should lay themselves out from the actual Stage dimensions. The
+vanilla holotape-program stage is nominally 826x700, which is distinct from the
+vanilla Pip-Boy render target. Controls need a configurable safe-area inset so
+curved or unusually cropped custom screens remain usable. The DLL should
+continue discovering the real D3D render target and report its dimensions
+instead of treating the INI values as the authoritative size. The current exact
+INI width/height match in `WorldTextureBridge` must therefore be replaced; the
+INI dimensions can remain a diagnostic fallback.
 
 ## Recommended render architecture
 
 The current native player copies a completed frame over the entire Pip-Boy
-render target. That works for the 0.1.1 native overlay, but it would also erase
+render target. That works for the 0.1.2 native overlay, but it would also erase
 an SWF drawn into the same target. A real two-part player therefore needs the
 decoded frame to become an image inside Scaleform rather than a final
 full-target overwrite. World outputs separately need decoded frames routed to
@@ -188,17 +273,17 @@ Add source files without committing compiled SDKs or cache directories:
 interface/
   browser/
     MMVPBrowser.as
-    MMVPBrowser.mxml
   player/
     MMVPPlayer.as
-    MMVPPlayer.mxml
   shared/
     MMVPBridge.as
+    MMVPFontLibrary.as
     MMVPLayout.as
     MMVPTypes.as
 scripts/
   build-interface-swfs.sh
-package/common/Interface/Programs/
+  validate-interface-swfs.py
+package/experimental/Programs/
   MMVPBrowser.swf
   MMVPPlayer.swf
 ```
@@ -208,25 +293,49 @@ Pip-Boy and workshop copies. Native code may use two thin host paths—a vanilla
 holotape-program host and a registered world custom-menu host—but both hosts
 must load the same compiled browser/player assets and bridge API.
 
-Apache Flex 4.16.1 `mxmlc` is known to be available on the current development
-machine at:
+Apache Flex 4.16.1 `mxmlc` is known to be available in the current development
+environment. Its observed local installation is:
 
 ```text
-/home/luke/.cache/mmvp-flex/apache-flex-sdk-4.16.1-bin/bin/mxmlc
+$HOME/.cache/mmvp-flex/apache-flex-sdk-4.16.1-bin/bin/mxmlc
 ```
 
 The repository script must accept `FLEX_HOME` or find `mxmlc` on `PATH`; it
 must not hardcode that machine-specific location. Build both SWFs for the
-ActionScript/Flash version supported by Fallout 4's Scaleform runtime. Add an
-offline validation script that checks the SWF header, expected exported
-classes, and bridge symbol names. Only after the SWFs load successfully in
-game should CMake and CI require them in the FOMOD.
+known-compatible vanilla program format: ActionScript 3, SWF version 10, ABC
+major version 46, a nominal 826x700 Stage, and 60 frames per second. Bethesda's
+shipped programs commonly use 30 fps, but MMVP uses 60 fps so ActionScript,
+input, and player presentation can advance at up to 60 Hz when Fallout advances
+the movie that often. This does not make Flash decode the video or replace the
+native media clock; the DLL still schedules decoded frames from timestamps and
+the actual game/render cadence remains the upper bound.
+
+Add an offline validation script that checks the SWF header, dimensions, frame
+rate, expected exported classes, lifecycle methods, and bridge symbol names.
+Only after the SWFs load successfully in game should CMake and CI require them
+in the FOMOD.
+
+Fallout's Scaleform runtime does not provide a dependable `_sans` device-font
+fallback. The browser must load Bethesda's existing `Programs/fonts_programs.swf`,
+register its `$Terminal_Font` class, and create dynamic text with the embedded
+`Share-TechMono` font. The player inherits that registered font from the
+browser host.
+
+`scripts/build-interface-swfs.sh` writes to the ignored `build/interface`
+directory by default and runs the validator automatically. Set
+`MMVP_SWF_OUTPUT_DIR=package/experimental/Programs` only after the in-game program
+and Back-path tests pass. The world-plugin generator always creates a direct
+`HolotapeProgram` targeting `MMVPBrowser.swf`; `MMVP_PROGRAM_SWF` only
+overrides that filename for development.
 
 ## Native-to-Scaleform bridge
 
-Use one stable bridge object under the active program root, for example
-`root.f4se.plugins.MainMenuVideoPlayer`. Keep commands and state versioned so a
-new DLL can reject an incompatible SWF cleanly.
+Use one stable bridge object under the active menu root, for example
+`root.f4se.plugins.MainMenuVideoPlayer`. A dynamically loaded program SWF may
+need to locate that object by walking to its Pip-Boy menu ancestor; the player
+child should route calls through its browser host rather than assume F4SE
+creates a second namespace inside the child. Keep commands and state versioned
+so a new DLL can reject an incompatible SWF cleanly.
 
 Suggested SWF-to-native commands:
 
@@ -236,7 +345,7 @@ Suggested SWF-to-native commands:
 | `openBrowser` | target context | Begin/refresh a browser session for one output |
 | `listTargets` | target kinds, offset, limit | List compatible placed outputs |
 | `selectTarget` | stable target ID | Make a TV/screen/projector the controlled output |
-| `pairTarget` | controller ID, output ID | Save a projector/screen or terminal/output pair |
+| `pairTarget` | controller ID, output ID | Save a projector/screen pair |
 | `clearPairing` | controller ID | Remove a saved world-object pairing |
 | `listMedia` | channel, offset, limit, sort | One page plus total count |
 | `playMedia` | target ID, stable media ID | Open on the selected output at its saved position |
@@ -278,7 +387,12 @@ browserOffset
 browserItems[]
 ```
 
-Pass stable media IDs, not raw absolute paths. The current media library can
+Pass stable media IDs, not raw absolute paths. Keep media classification
+separate from presentation: `Movie` and `Television` are media categories,
+while Pip-Boy, vanilla-terminal display, television, and projector screen are
+output targets.
+The current `PlaybackChannel` type conflates these concepts and must be split
+before arbitrary media can be routed to arbitrary outputs. The media library can
 derive an ID from the channel-relative normalized path. A browser item should
 contain ID, display name, channel, extension, and optional duration. Page the
 list rather than pushing thousands of entries through Scaleform in one call.
@@ -330,10 +444,8 @@ Rules:
 - Every error and every unexpected SWF unload must run the same idempotent
   cleanup path.
 
-The current terminal commands call random activation directly, which is why
-reloading a choice creates a new session instead of resuming. Refactor that
-entry point into separate `OpenBrowser`, `PlayMedia`, `PlayRandom`, and
-`Resume` operations before connecting the new SWFs.
+Keep `OpenBrowser`, `PlayMedia`, `PlayRandom`, and `Resume` as separate bridge
+operations so opening a host never starts or replaces media unexpectedly.
 
 ## Input and cursor plan
 
@@ -342,45 +454,59 @@ should handle only global lifecycle keys and gamepad translation that cannot
 be expressed through the program SWF.
 
 - Use the program Stage mouse coordinates for SWF controls.
-- Do not draw the current projected green C++ cursor on top of the SWF cursor.
+- With `UseOwnCursor=true`, draw one visible SWF cursor and keep it above both
+  the browser and dynamically loaded player. Do not draw the current projected
+  green C++ cursor on top of it.
 - Hide Fallout's flat `CursorMenu` cursor only after the program cursor is
   confirmed visible.
 - Restore it before unloading the player, including decode errors and game
   shutdown.
 - Back from player opens browser; Back from browser closes the holotape program
   or world interaction menu. A held key must not trigger both transitions.
+- Consume the complete vanilla holotape event set (`Accept`, `Jump`, `Left`,
+  `Right`, `Up`, and `Down`) even when a particular view does nothing with an
+  event. Returning `false` allows mapped gameplay controls to leak through.
+  Tab is the only keyboard Back/exit key; Escape, Backspace, and unrelated
+  gameplay keys remain inert while the program is active.
 - Support keyboard, mouse, and controller focus. Never require a pointer to
   leave playback.
 
-The 0.1.1 projected-cursor implementation should remain available behind the
+The 0.1.2 projected-cursor implementation should remain available behind the
 native-player path until the SWF player has passed the complete test matrix.
 
 ## Implementation sequence
 
-1. Add a native browser model that returns paged, sorted Movie/TV items and
+1. Add the pure-AS3 browser/player shells, reproducible Flex build, and offline
+   SWF validation. Do not make the release package depend on them yet.
+2. Generate the holotape directly as an `MMVPBrowser.swf`
+   `HolotapeProgram`; do not add a custom or recovery terminal.
+3. Prove the browser loads in game and that Back, repeated opening,
+   keyboard/controller input, and Stage-based layout work.
+4. Expose `getApiVersion` and browser launch commands through real GFx
+   function objects under the F4SE bridge. (Implemented for the current
+   browser checkpoint.)
+5. Prototype native D3D11 texture registration as `img://MMVPVideo`. Prove one
+   static test frame appears behind an SWF button before building the media
+   browser or world-target system.
+6. Have the browser dynamically load and unload `MMVPPlayer.swf`; prove player
+   Back returns to the still-live browser.
+7. Add a native browser model that returns paged, sorted Movie/TV items and
    stable media IDs. Unit-test path normalization and pagination.
-2. Add a target registry for the Pip-Boy and placed televisions, projectors,
-   screens, and terminals. Define pairing, capability, and save-data records.
-3. Split the current random terminal activation into browser, selected,
-   random, and resume commands without changing rendering.
-4. Implement `MMVPBrowser.swf` using only text/list controls and prove that
-   loading, selecting, Back, repeated opening, and custom-Pip-Boy layout work.
-5. Register the world custom-menu host and open the same browser SWF when an
+8. Keep browser, selected, random, and resume commands independent.
+9. Connect decoded frames to the proven external image and implement progress,
+   seeking, pause, previous/next, stop, and return-to-browser.
+10. Split media categories from outputs and add a target registry for the
+   Pip-Boy and placed televisions, projectors, and screens. Define
+   pairing, capability, per-reference session, and save-data records.
+11. Register the world custom-menu host and open the same browser SWF when an
    MMVP workshop object is activated.
-6. Implement target selection and explicit projector/screen plus
-   terminal/output pairing before enabling video playback.
-7. Implement the versioned bridge and event/state transport.
-8. Prototype native D3D11 texture registration as a Scaleform image. Prove one
-   static test frame appears behind an SWF button before connecting FFmpeg.
-9. Implement `MMVPPlayer.swf`, responsive layout, progress updates, seeking,
-   pause, previous/next, stop, and return-to-browser.
-10. Route decoded frames either to the Pip-Boy external image or the selected
-    world material, and use spatial XAudio for world outputs.
-11. Migrate serialization by version while retaining compatibility with 0.1.1
-    save data and storing world reference pairings/playback independently.
-12. Remove the temporary terminal options only after both SWFs are reliable.
-    Keep a recovery terminal entry or INI option for one release.
-13. Add the SWF build and validation steps to CMake/CI and package both SWFs.
+12. Implement target selection and explicit projector/screen pairing before
+   enabling world video playback.
+13. Route decoded frames either to the Pip-Boy external image or the selected
+   world material, and use spatial XAudio for world outputs.
+14. Migrate serialization by version while retaining compatibility with 0.1.1
+   save data and storing world reference pairings/playback independently.
+15. Add the SWF build and validation steps to CMake/CI and package both SWFs.
 
 ## Likely native files to change
 
@@ -399,12 +525,11 @@ native-player path until the SWF player has passed the complete test matrix.
 - `src/Plugin.cpp`: register bridge callbacks and cleanup messaging.
 - `CMakeLists.txt`, `.github/workflows/build.yml`, and FOMOD metadata: build,
   validate, and package the two SWFs after the in-game prototype works.
-- `tools/WorldPluginGenerator/Program.cs`: attach activation/controller data to
-  the TV, projector, movie screen, and a new craftable MMVP video terminal.
+- `tools/WorldPluginGenerator/Program.cs`: generate the direct program
+  holotape and attach activation/controller data to TVs, projectors, and movie
+  screens. It must not add a custom terminal.
 - Papyrus sources: add a small world-screen controller script and a versioned
   native call that opens the shared browser for the activated reference.
-- The terminal fragment: point the holotape at the browser program while
-  retaining a recovery path.
 
 ## Required validation matrix
 
@@ -429,7 +554,8 @@ In-game tests should cover:
   Back, repeated open/close, save/load while paused, and game shutdown;
 - main-menu ordinary video, BK2 selection, XWM sidecar, and all existing
   hotkeys after the Pip-Boy changes;
-- craft and place multiple TVs, projectors, screens, and video terminals;
+- craft and place multiple TVs, projectors, and screens;
+- load the MMVP holotape from several unrelated vanilla terminals;
 - activate each kind and confirm the same browser/player design opens with the
   correct target name and capabilities;
 - pair two projectors with two different screens, move them, save/load, scrap
@@ -447,9 +573,9 @@ The SWF work is complete only when a user can browse individual Movie and TV
 files, start one, pause it, leave and resume at the same position, return to
 the browser, and exit to a fully functional Pip-Boy without a blank screen,
 stuck input, duplicate cursor, audio leak, or dependence on the vanilla
-Pip-Boy's exact geometry. The same browser/player must open from every MMVP
-television, projector, screen, and video terminal, control the correct placed
-output, retain explicit pairings and per-output progress across saves, and
-close without stopping unrelated world screens. OG, NG, and AE packages must
-all still build, and the main-menu player must pass its existing regression
-checks.
+Pip-Boy's exact geometry. The same browser/player must open from the Pip-Boy,
+ordinary vanilla terminals, and every MMVP television, projector, and screen;
+control the correct output; retain explicit pairings and per-output progress
+across saves; and close without stopping unrelated world screens. OG, NG, and
+AE packages must all still build, and the main-menu player must pass its
+existing regression checks.

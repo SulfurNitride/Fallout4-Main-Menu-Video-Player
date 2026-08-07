@@ -29,6 +29,7 @@ struct VideoFrame
     std::uint32_t height{ 0 };
     std::uint32_t rowPitch{ 0 };
     std::uint64_t serial{ 0 };
+    PlaybackChannel channel{ PlaybackChannel::kMainMenu };
 };
 
 struct PlaybackSnapshot

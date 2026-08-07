@@ -7,6 +7,15 @@
 
 class AudioOutput;
 
+struct MediaProgress
+{
+    std::string mediaId;
+    double positionSeconds{ 0.0 };
+    double durationSeconds{ 0.0 };
+    std::uint64_t lastPlayedMilliseconds{ 0 };
+    bool completed{ false };
+};
+
 class WorldPlaybackSession
 {
 public:
@@ -29,7 +38,17 @@ public:
     WorldPlaybackSession& operator=(const WorldPlaybackSession&) = delete;
 
     void RefreshLibrary();
-    [[nodiscard]] std::vector<std::string> AvailableMedia() const;
+    void RefreshCatalog();
+    [[nodiscard]] std::vector<MediaLibrary::Item> AvailableMedia() const;
+    [[nodiscard]] std::size_t MediaCount() const;
+    [[nodiscard]] std::optional<MediaLibrary::Item> MediaAt(
+        std::size_t index) const;
+    [[nodiscard]] std::optional<MediaProgress> Progress(
+        std::string_view mediaId) const;
+    [[nodiscard]] std::vector<MediaProgress> ProgressHistory() const;
+    [[nodiscard]] std::optional<MediaProgress> MostRecentProgress() const;
+    void RestoreProgressHistory(std::vector<MediaProgress> progress);
+    void ClearProgressHistory();
     [[nodiscard]] bool Select(std::string_view mediaId);
     [[nodiscard]] bool Restore(
         std::string_view mediaId,
@@ -73,6 +92,11 @@ private:
     [[nodiscard]] bool ShouldPause() const noexcept;
     [[nodiscard]] std::optional<std::filesystem::path>
         SelectAutomaticMedia();
+    [[nodiscard]] bool QueueSelection(
+        std::string_view mediaId,
+        double positionSeconds,
+        bool paused,
+        bool markRecent);
     void UpdateState(
         PlaybackState state,
         const std::filesystem::path& path = {},
@@ -85,7 +109,9 @@ private:
     mutable std::mutex stateMutex_;
     std::condition_variable_any wakeCondition_;
     std::vector<std::filesystem::path> media_;
+    std::vector<MediaLibrary::Item> catalog_;
     std::vector<std::filesystem::path> history_;
+    std::unordered_map<std::string, MediaProgress> progress_;
     std::optional<std::filesystem::path> requestedMedia_;
     PlaybackSnapshot snapshot_;
     std::atomic<float> volume_{ 1.0F };

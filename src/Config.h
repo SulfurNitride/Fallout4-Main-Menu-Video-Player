@@ -10,6 +10,7 @@ namespace Config
     [[nodiscard]] bool EnableWorldScreens() noexcept;
     [[nodiscard]] bool EnablePipBoyPlayer() noexcept;
     [[nodiscard]] std::filesystem::path MainMenuDirectory();
+    [[nodiscard]] std::filesystem::path MainMenuAudioDirectory();
     [[nodiscard]] std::filesystem::path TelevisionDirectory();
     [[nodiscard]] std::filesystem::path MovieDirectory();
     [[nodiscard]] std::uint32_t TelevisionWidth() noexcept;
@@ -24,6 +25,8 @@ namespace Config
     [[nodiscard]] std::uint32_t MainMenuNextKey() noexcept;
     [[nodiscard]] std::uint32_t MainMenuVolumeUpKey() noexcept;
     [[nodiscard]] std::uint32_t MainMenuVolumeDownKey() noexcept;
+    [[nodiscard]] std::uint32_t MainMenuNextAudioKey() noexcept;
+    [[nodiscard]] std::uint32_t MainMenuToggleOriginalAudioKey() noexcept;
     [[nodiscard]] float MainMenuVolume() noexcept;
     [[nodiscard]] float MainMenuVolumeStep() noexcept;
     [[nodiscard]] float TelevisionVolume() noexcept;

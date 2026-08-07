@@ -13,6 +13,9 @@ namespace
     std::filesystem::path mainMenuDirectory{
         "Data/MainMenuVideos"
     };
+    std::filesystem::path mainMenuAudioDirectory{
+        "Data/MainMenuAudio"
+    };
     std::filesystem::path televisionDirectory{
         "Data/TVVideos"
     };
@@ -31,6 +34,8 @@ namespace
     std::uint32_t mainMenuNextKey{ VK_TAB };
     std::uint32_t mainMenuVolumeUpKey{ VK_PRIOR };
     std::uint32_t mainMenuVolumeDownKey{ VK_NEXT };
+    std::uint32_t mainMenuNextAudioKey{ 'N' };
+    std::uint32_t mainMenuToggleOriginalAudioKey{ 'M' };
     float mainMenuVolume{ 1.0F };
     float mainMenuVolumeStep{ 0.1F };
     float televisionVolume{ 1.0F };
@@ -152,6 +157,10 @@ void Config::Load(const HMODULE module)
         path,
         L"MainMenuDirectory",
         L"Data\\MainMenuVideos");
+    mainMenuAudioDirectory = ReadPath(
+        path,
+        L"MainMenuAudioDirectory",
+        L"Data\\MainMenuAudio");
     televisionDirectory = ReadPath(
         path,
         L"TelevisionDirectory",
@@ -184,6 +193,15 @@ void Config::Load(const HMODULE module)
         path, L"MainMenuControls", L"VolumeUpKey", VK_PRIOR, 0, 255);
     mainMenuVolumeDownKey = ReadUnsigned(
         path, L"MainMenuControls", L"VolumeDownKey", VK_NEXT, 0, 255);
+    mainMenuNextAudioKey = ReadUnsigned(
+        path, L"MainMenuControls", L"NextAudioKey", 'N', 0, 255);
+    mainMenuToggleOriginalAudioKey = ReadUnsigned(
+        path,
+        L"MainMenuControls",
+        L"ToggleOriginalAudioKey",
+        'M',
+        0,
+        255);
     mainMenuVolume = ReadFloat(
         path, L"Audio", L"MainMenuVolume", 1.0F, 0.0F, 2.0F);
     mainMenuVolumeStep = ReadFloat(
@@ -196,7 +214,8 @@ void Config::Load(const HMODULE module)
     spdlog::info(
         "Configuration: EnableNativeMainMenuBink={}, "
         "MuteVanillaMenuMusic={}, KeepPlayingWhenBorderless={}, "
-        "EnableWorldScreens={}, EnablePipBoyPlayer={}, RecursiveMediaScan={}",
+        "EnableWorldScreens={}, "
+        "EnablePipBoyPlayer={}, RecursiveMediaScan={}",
         enableNativeMainMenuBink,
         muteVanillaMenuMusic,
         keepPlayingWhenBorderless,
@@ -204,17 +223,22 @@ void Config::Load(const HMODULE module)
         enablePipBoyPlayer,
         recursiveMediaScan);
     spdlog::info(
-        "Media directories: main menu='{}', TV='{}', movies='{}'",
+        "Media directories: main menu='{}', main-menu audio='{}', "
+        "TV='{}', movies='{}'",
         mainMenuDirectory.string(),
+        mainMenuAudioDirectory.string(),
         televisionDirectory.string(),
         movieDirectory.string());
     spdlog::info(
         "Main-menu controls: stop={}, next={}, volume up={}, "
-        "volume down={}, step={:.2f}, help={} ms",
+        "volume down={}, next audio={}, toggle original audio={}, "
+        "step={:.2f}, help={} ms",
         mainMenuStopKey,
         mainMenuNextKey,
         mainMenuVolumeUpKey,
         mainMenuVolumeDownKey,
+        mainMenuNextAudioKey,
+        mainMenuToggleOriginalAudioKey,
         mainMenuVolumeStep,
         mainMenuHelpMilliseconds);
 }
@@ -252,6 +276,11 @@ bool Config::EnablePipBoyPlayer() noexcept
 std::filesystem::path Config::MainMenuDirectory()
 {
     return mainMenuDirectory;
+}
+
+std::filesystem::path Config::MainMenuAudioDirectory()
+{
+    return mainMenuAudioDirectory;
 }
 
 std::filesystem::path Config::TelevisionDirectory()
@@ -322,6 +351,16 @@ std::uint32_t Config::MainMenuVolumeUpKey() noexcept
 std::uint32_t Config::MainMenuVolumeDownKey() noexcept
 {
     return mainMenuVolumeDownKey;
+}
+
+std::uint32_t Config::MainMenuNextAudioKey() noexcept
+{
+    return mainMenuNextAudioKey;
+}
+
+std::uint32_t Config::MainMenuToggleOriginalAudioKey() noexcept
+{
+    return mainMenuToggleOriginalAudioKey;
 }
 
 float Config::MainMenuVolume() noexcept

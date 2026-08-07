@@ -35,14 +35,13 @@ to_windows_path()
 
 STUBS="$(to_windows_path "${PROJECT_DIR}/tools/PapyrusStubs")"
 FLAGS="$(to_windows_path "${PROJECT_DIR}/tools/PapyrusStubs/MMVP_Papyrus_Flags.flg")"
-SOURCES="$(to_windows_path "${PROJECT_DIR}/package/common/Scripts/Source/User")"
-OUTPUT="$(to_windows_path "${PROJECT_DIR}/package/common/Scripts")"
+SOURCES="$(to_windows_path "${PROJECT_DIR}/package/experimental/Scripts/Source/User")"
+OUTPUT="$(to_windows_path "${PROJECT_DIR}/package/experimental/Scripts")"
 
-mkdir -p "${PROJECT_DIR}/package/common/Scripts"
-pushd "${PROJECT_DIR}/package/common/Scripts/Source/User" >/dev/null
+mkdir -p "${PROJECT_DIR}/package/experimental/Scripts"
+pushd "${PROJECT_DIR}/package/experimental/Scripts/Source/User" >/dev/null
 for source in \
-    'MMVP\HolotapeQuest.psc' \
-    'Fragments\Terminals\TERM_MMVP_PlayerTerminal_00000808.psc'
+    'MMVP\HolotapeQuest.psc'
 do
     "${WINE64}" "${CAPRICA_EXE}" \
         --ignorecwd \
@@ -59,4 +58,4 @@ do
 done
 popd >/dev/null
 
-echo "Compiled MMVP Papyrus scripts under package/common/Scripts."
+echo "Compiled experimental MMVP Papyrus scripts."

@@ -222,12 +222,9 @@ namespace WorldTextureBridge
             const bool wasPipBoyBound = pipBoyBound;
             bool willBindPipBoy = false;
             ID3D11Texture2D* detectedTexture = nullptr;
-            if ((PipBoyPlayer::Active() ||
-                 PipBoyPlayer::CommandDetectionReady()) &&
-                views) {
+            if (PipBoyPlayer::Active() && views) {
                 for (UINT index = 0; index < viewCount; ++index) {
                     if (IsPipBoyTarget(views[index], &detectedTexture)) {
-                        PipBoyPlayer::PollScaleformCommand();
                         willBindPipBoy = PipBoyPlayer::Active();
                         if (!willBindPipBoy) {
                             detectedTexture->Release();

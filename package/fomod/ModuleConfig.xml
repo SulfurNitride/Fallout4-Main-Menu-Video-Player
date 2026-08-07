@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="https://qconsulting.ca/fo3/ModConfig5.0.xsd">
-  <moduleName>Main Menu Video Player and World Screens</moduleName>
+  <moduleName>Main Menu Video Player</moduleName>
   <requiredInstallFiles>
     <folder source="common" destination="" priority="0" />
   </requiredInstallFiles>
@@ -32,6 +32,30 @@
               <description>For Fallout 4 executable versions 1.11.137, 1.11.159, 1.11.169, 1.11.191, and 1.11.221.</description>
               <files>
                 <folder source="runtime/AE" destination="" priority="0" />
+              </files>
+              <typeDescriptor>
+                <type name="Optional" />
+              </typeDescriptor>
+            </plugin>
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+    <installStep name="Experimental holotape player">
+      <optionalFileGroups order="Explicit">
+        <group name="Pip-Boy, terminal, and world-screen prototype" type="SelectExactlyOne">
+          <plugins order="Explicit">
+            <plugin name="Main-menu player only — Recommended">
+              <description>Installs only the stable native main-menu player plus its MainMenuVideos and optional MainMenuAudio folders. No TVVideos or MovieVideos folders, ESP-FE, Papyrus scripts, holotape, or world-screen prototype is installed.</description>
+              <files />
+              <typeDescriptor>
+                <type name="Recommended" />
+              </typeDescriptor>
+            </plugin>
+            <plugin name="Experimental holotape and world screens">
+              <description>Installs the TVVideos and MovieVideos folders, ESP-FE, MMVP holotape, browser/player SWFs, and unfinished world-screen assets. This path is under active development and may crash or conflict with Pip-Boy, terminal, input, or UI mods. Use a test save.</description>
+              <files>
+                <folder source="experimental" destination="" priority="0" />
               </files>
               <typeDescriptor>
                 <type name="Optional" />

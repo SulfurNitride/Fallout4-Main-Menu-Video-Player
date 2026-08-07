@@ -1,5 +1,9 @@
 Put main-menu videos in this folder.
 
+The recommended FOMOD installation provides main-menu playback without an
+ESP or holotape. The holotape/Pip-Boy/world-screen feature is a separate,
+explicitly experimental installer option.
+
 The player currently accepts:
 3g2, 3gp, asf, avi, f4v, flv, m4v, mkv, mov, mp4, mpeg, mpg,
 ogv, qt, vob, webm, wmv, and native bk2 Bink videos.
@@ -15,8 +19,14 @@ same basename:
     AwesomeVideo.xwm
 
 The XWM starts with the Bink, loops at its end, and uses MMVP's volume keys.
-Avoid pairing an XWM with a BK2 that already contains audio unless you want
-both tracks to play.
+Audio embedded directly in a BK2 uses the same volume keys. MMVP scales the
+volume Fallout assigns to each observed audio track instead of assuming track
+numbers, so BK2 files with different audio-track layouts remain safe.
+When an XWM sidecar is present, it takes priority: MMVP mutes every embedded
+BK2 audio track before playback and plays only the XWM soundtrack.
+If MainMenuAudio contains a supported file, that dedicated library takes
+priority instead. Same-name sidecars remain ignored while it plays; M restores
+the video's own embedded/original audio stream.
 
 Default main-menu controls:
 
@@ -24,6 +34,8 @@ Default main-menu controls:
     Backspace   Stop video and audio
     Page Up     Volume up
     Page Down   Volume down
+    N           Next dedicated soundtrack
+    M           Toggle dedicated/original audio
 
 The upper-left help card displays these controls for five seconds. Their keys,
 volume step, and display time can be changed in:

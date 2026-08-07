@@ -23,6 +23,9 @@ namespace BinkHook
             void*,
             std::uint32_t,
             std::int32_t);
+        using BinkSetSoundOnOff = std::int32_t (__stdcall*)(
+            void*,
+            std::int32_t);
         using BinkDoFrame = std::int32_t (__stdcall*)(void*);
         using BinkNextFrame = void (__stdcall*)(void*);
         using BinkWait = std::int32_t (__stdcall*)(void*);
@@ -58,6 +61,7 @@ namespace BinkHook
         BinkClose originalClose{ nullptr };
         BinkPause originalPause{ nullptr };
         BinkSetVolume originalSetVolume{ nullptr };
+        BinkSetSoundOnOff originalSetSoundOnOff{ nullptr };
         BinkDoFrame originalDoFrame{ nullptr };
         BinkNextFrame originalNextFrame{ nullptr };
         BinkWait originalWait{ nullptr };
@@ -78,13 +82,16 @@ namespace BinkHook
         std::atomic<bool> loggedUnsupportedSurface{ false };
         std::atomic<bool> replaceMainMenuVideo{ false };
         std::atomic<bool> mainMenuStopped{ false };
-        std::atomic<bool> pendingSidecarStart{ false };
+        std::atomic<bool> pendingOverrideAudioStart{ false };
         std::atomic<std::uint64_t> helpVisibleUntil{ 0 };
         std::atomic<std::uint64_t> helpRevision{ 1 };
+        std::unordered_map<std::uint32_t, std::int32_t>
+            mainMenuTrackVolumes;
+        bool loggedTrackVolumeLimit{ false };
         std::mutex selectionMutex;
         std::filesystem::path previousSelection;
         std::filesystem::path currentSelection;
-        std::optional<std::filesystem::path> pendingSidecar;
+        std::optional<std::filesystem::path> pendingOverrideAudio;
         std::mt19937_64 selectionRandom{ std::random_device{}() };
 
         struct ScaleMap
@@ -499,7 +506,7 @@ namespace BinkHook
                 std::format(
                     "NOW PLAYING: {}",
                     selection.filename().string());
-            const std::array<std::string, 5> lines{
+            std::vector<std::string> lines{
                 status,
                 std::format(
                     "{}  NEW RANDOM VIDEO",
@@ -515,6 +522,16 @@ namespace BinkHook
                     "VOLUME: {:.0f}%",
                     VideoPlayer::GetSingleton().Volume() * 100.0F)
             };
+            lines.push_back(std::format(
+                "{}  NEXT SOUNDTRACK",
+                VirtualKeyName(Config::MainMenuNextAudioKey())));
+            lines.push_back(std::format(
+                "{}  AUDIO: {}",
+                VirtualKeyName(
+                    Config::MainMenuToggleOriginalAudioKey()),
+                VideoPlayer::GetSingleton().OriginalAudioPreferred() ?
+                    "VIDEO" :
+                    "DEDICATED"));
             const int scale = outputWidth >= 1600 ? 3 : 2;
             std::size_t maximumCharacters = 0;
             for (const auto& line : lines) {
@@ -563,6 +580,80 @@ namespace BinkHook
                    header->height <= 16384;
         }
 
+        std::int32_t ScaledBinkVolume(
+            const std::int32_t sourceVolume) noexcept
+        {
+            const double multiplier = std::clamp(
+                static_cast<double>(
+                    VideoPlayer::GetSingleton().Volume()),
+                0.0,
+                2.0);
+            const double scaled =
+                static_cast<double>(sourceVolume) * multiplier;
+            return static_cast<std::int32_t>(std::clamp(
+                scaled,
+                static_cast<double>(
+                    std::numeric_limits<std::int32_t>::min()),
+                static_cast<double>(
+                    std::numeric_limits<std::int32_t>::max())));
+        }
+
+        void RememberMainMenuTrackVolumeLocked(
+            const std::uint32_t track,
+            const std::int32_t volume)
+        {
+            constexpr std::size_t kMaximumRememberedTracks{ 64 };
+            const auto existing = mainMenuTrackVolumes.find(track);
+            if (existing != mainMenuTrackVolumes.end()) {
+                existing->second = volume;
+                return;
+            }
+            if (mainMenuTrackVolumes.size() >=
+                kMaximumRememberedTracks) {
+                if (!loggedTrackVolumeLimit) {
+                    loggedTrackVolumeLimit = true;
+                    spdlog::warn(
+                        "Ignoring excess main-menu Bink audio-track "
+                        "volume calls after {} distinct track IDs",
+                        kMaximumRememberedTracks);
+                }
+                return;
+            }
+            mainMenuTrackVolumes.emplace(track, volume);
+            spdlog::debug(
+                "Observed main-menu Bink audio track ID {} at source "
+                "volume {}",
+                track,
+                volume);
+        }
+
+        void ApplyActiveBinkVolumesLocked()
+        {
+            if (!activeBink ||
+                !activeBinkSelection.load(std::memory_order_acquire) ||
+                !originalSetVolume) {
+                return;
+            }
+
+            for (const auto& [track, sourceVolume] :
+                 mainMenuTrackVolumes) {
+                // BinkSetVolume uses the file's track ID, not an array
+                // index. The decoder safely ignores an observed carrier
+                // track ID that is absent from the selected BK2.
+                originalSetVolume(
+                    activeBink,
+                    track,
+                    ScaledBinkVolume(sourceVolume));
+            }
+            if (!mainMenuTrackVolumes.empty()) {
+                spdlog::debug(
+                    "Applied MMVP volume {:.0f}% to {} active BK2 "
+                    "audio track ID(s)",
+                    VideoPlayer::GetSingleton().Volume() * 100.0F,
+                    mainMenuTrackVolumes.size());
+            }
+        }
+
         void* DetachSecondaryBinkLocked(void* owner)
         {
             void* detached =
@@ -595,14 +686,36 @@ namespace BinkHook
 
             auto& player = VideoPlayer::GetSingleton();
             player.OnNativeVideoClosed();
-            player.StopSidecarAudio();
-            pendingSidecarStart.store(false, std::memory_order_release);
+            player.StopOverrideAudio();
+            pendingOverrideAudioStart.store(
+                false,
+                std::memory_order_release);
             {
                 std::scoped_lock lock(selectionMutex);
-                pendingSidecar.reset();
+                pendingOverrideAudio.reset();
             }
 
-            if (IsBinkVideo(selection)) {
+            const bool binkSelection = IsBinkVideo(selection);
+            std::optional<std::filesystem::path> overrideAudio;
+            bool dedicatedAudio = false;
+            if (!player.OriginalAudioPreferred()) {
+                overrideAudio = player.PickDedicatedAudio();
+                dedicatedAudio = overrideAudio.has_value();
+                if (!overrideAudio) {
+                    player.SetOriginalAudioPreferred(true);
+                    spdlog::warn(
+                        "Falling back to the selected video's original "
+                        "audio because the dedicated library is empty");
+                }
+            }
+            if (!overrideAudio &&
+                player.OriginalAudioPreferred() &&
+                binkSelection) {
+                overrideAudio = FindXwmSidecar(selection);
+            }
+            player.SetOriginalAudioAudible(!overrideAudio.has_value());
+
+            if (binkSelection) {
                 const std::string path = Utf8Path(selection);
                 void* selectedBink = originalOpen(
                     path.c_str(),
@@ -617,6 +730,23 @@ namespace BinkHook
                     return false;
                 }
 
+                if (overrideAudio) {
+                    originalSetSoundOnOff(selectedBink, 0);
+                    if (dedicatedAudio) {
+                        spdlog::info(
+                            "Muted embedded BK2 audio in favor of "
+                            "dedicated soundtrack: {}",
+                            Utf8Path(*overrideAudio));
+                    } else {
+                        spdlog::info(
+                            "Muted embedded BK2 audio in favor of XWM "
+                            "sidecar: {}",
+                            Utf8Path(*overrideAudio));
+                    }
+                } else {
+                    originalSetSoundOnOff(selectedBink, 1);
+                }
+
                 void* replaced = nullptr;
                 {
                     std::scoped_lock lock(activeBinkMutex);
@@ -625,6 +755,7 @@ namespace BinkHook
                     activeBinkSelection.store(
                         true,
                         std::memory_order_release);
+                    ApplyActiveBinkVolumesLocked();
                 }
                 CloseDetachedBink(replaced);
                 const auto* header =
@@ -636,19 +767,6 @@ namespace BinkHook
                     header->height,
                     owner);
 
-                const auto sidecar = FindXwmSidecar(selection);
-                {
-                    std::scoped_lock lock(selectionMutex);
-                    pendingSidecar = sidecar;
-                }
-                pendingSidecarStart.store(
-                    sidecar.has_value(),
-                    std::memory_order_release);
-                if (sidecar) {
-                    spdlog::info(
-                        "Matched XWM sidecar for BK2 overlay: {}",
-                        Utf8Path(*sidecar));
-                }
             } else {
                 void* replaced = nullptr;
                 {
@@ -660,6 +778,20 @@ namespace BinkHook
                     mainMenuWidth.load(std::memory_order_acquire),
                     mainMenuHeight.load(std::memory_order_acquire),
                     selection);
+            }
+
+            {
+                std::scoped_lock lock(selectionMutex);
+                pendingOverrideAudio = overrideAudio;
+            }
+            pendingOverrideAudioStart.store(
+                overrideAudio.has_value(),
+                std::memory_order_release);
+            if (overrideAudio) {
+                spdlog::info(
+                    "Queued {} main-menu audio override: {}",
+                    dedicatedAudio ? "dedicated" : "sidecar",
+                    Utf8Path(*overrideAudio));
             }
 
             SetCurrentSelection(selection);
@@ -681,11 +813,66 @@ namespace BinkHook
             }
             CloseDetachedBink(detached);
             VideoPlayer::GetSingleton().OnNativeVideoClosed();
-            VideoPlayer::GetSingleton().StopSidecarAudio();
-            pendingSidecarStart.store(false, std::memory_order_release);
+            VideoPlayer::GetSingleton().StopOverrideAudio();
+            pendingOverrideAudioStart.store(
+                false,
+                std::memory_order_release);
+            {
+                std::scoped_lock lock(selectionMutex);
+                pendingOverrideAudio.reset();
+            }
             mainMenuStopped.store(true, std::memory_order_release);
             replaceMainMenuVideo.store(true, std::memory_order_release);
             ShowHelp(Config::MainMenuHelpMilliseconds());
+        }
+
+        void ClearPendingOverrideAudio()
+        {
+            pendingOverrideAudioStart.store(
+                false,
+                std::memory_order_release);
+            std::scoped_lock lock(selectionMutex);
+            pendingOverrideAudio.reset();
+        }
+
+        void SetSelectedBinkSound(const bool enabled)
+        {
+            std::scoped_lock lock(activeBinkMutex);
+            if (activeBink &&
+                activeBinkSelection.load(std::memory_order_acquire)) {
+                originalSetSoundOnOff(activeBink, enabled ? 1 : 0);
+            }
+        }
+
+        bool StartNextDedicatedAudio()
+        {
+            auto& player = VideoPlayer::GetSingleton();
+            const auto selected = player.PickDedicatedAudio();
+            if (!selected) {
+                return false;
+            }
+
+            ClearPendingOverrideAudio();
+            player.StopOverrideAudio();
+            player.SetOriginalAudioPreferred(false);
+            player.SetOriginalAudioAudible(false);
+            SetSelectedBinkSound(false);
+            player.StartOverrideAudio(*selected);
+            spdlog::info(
+                "Started next dedicated main-menu soundtrack: {}",
+                Utf8Path(*selected));
+            return true;
+        }
+
+        void RestoreOriginalVideoAudio()
+        {
+            auto& player = VideoPlayer::GetSingleton();
+            ClearPendingOverrideAudio();
+            player.StopOverrideAudio();
+            player.SetOriginalAudioPreferred(true);
+            player.SetOriginalAudioAudible(true);
+            SetSelectedBinkSound(true);
+            spdlog::info("Restored the selected video's original audio");
         }
 
         void CaptureActiveBinkFrameLocked(void* handle)
@@ -698,6 +885,7 @@ namespace BinkHook
             const auto* header =
                 static_cast<const PublicBinkHeader*>(handle);
             auto frame = std::make_shared<VideoFrame>();
+            frame->channel = PlaybackChannel::kMainMenu;
             frame->width = header->width;
             frame->height = header->height;
             frame->rowPitch = frame->width * 4;
@@ -749,10 +937,22 @@ namespace BinkHook
             const std::int32_t volume)
         {
             std::scoped_lock lock(activeBinkMutex);
+            const bool mainMenuCall =
+                handle == mainMenuBink.load(std::memory_order_acquire);
+            if (mainMenuCall) {
+                RememberMainMenuTrackVolumeLocked(track, volume);
+            }
+            void* routed = RoutedBinkLocked(handle);
+            const bool selectedBinkCall =
+                mainMenuCall &&
+                routed == activeBink &&
+                activeBinkSelection.load(std::memory_order_acquire);
             return originalSetVolume(
-                RoutedBinkLocked(handle),
+                routed,
                 track,
-                volume);
+                selectedBinkCall ?
+                    ScaledBinkVolume(volume) :
+                    volume);
         }
 
         std::int32_t __stdcall HookedDoFrame(void* handle)
@@ -830,6 +1030,8 @@ namespace BinkHook
             void* staleSecondary = nullptr;
             {
                 std::scoped_lock lock(activeBinkMutex);
+                mainMenuTrackVolumes.clear();
+                loggedTrackVolumeLimit = false;
                 staleSecondary = DetachSecondaryBinkLocked(handle);
             }
             CloseDetachedBink(staleSecondary);
@@ -880,6 +1082,8 @@ namespace BinkHook
                     std::scoped_lock lock(activeBinkMutex);
                     detached = DetachSecondaryBinkLocked(handle);
                     activeBink = nullptr;
+                    mainMenuTrackVolumes.clear();
+                    loggedTrackVolumeLimit = false;
                 }
                 CloseDetachedBink(detached);
                 mainMenuOpenFlags = 0;
@@ -887,14 +1091,16 @@ namespace BinkHook
                 mainMenuHeight.store(0, std::memory_order_release);
                 replaceMainMenuVideo.store(false, std::memory_order_release);
                 mainMenuStopped.store(false, std::memory_order_release);
-                pendingSidecarStart.store(false, std::memory_order_release);
+                pendingOverrideAudioStart.store(
+                    false,
+                    std::memory_order_release);
                 {
                     std::scoped_lock lock(selectionMutex);
-                    pendingSidecar.reset();
+                    pendingOverrideAudio.reset();
                     currentSelection.clear();
                 }
                 VideoPlayer::GetSingleton().OnNativeVideoClosed();
-                VideoPlayer::GetSingleton().StopSidecarAudio();
+                VideoPlayer::GetSingleton().StopOverrideAudio();
                 EngineSettings::EndMainMenu();
                 spdlog::info("Released native main-menu Bink handle");
             }
@@ -1250,16 +1456,17 @@ namespace BinkHook
             if (!isMainMenu) {
                 return result;
             }
-            if (pendingSidecarStart.exchange(
+            if (pendingOverrideAudioStart.exchange(
                     false,
                     std::memory_order_acq_rel)) {
-                std::optional<std::filesystem::path> sidecar;
+                std::optional<std::filesystem::path> overrideAudio;
                 {
                     std::scoped_lock lock(selectionMutex);
-                    sidecar = pendingSidecar;
+                    overrideAudio = pendingOverrideAudio;
                 }
-                if (sidecar) {
-                    VideoPlayer::GetSingleton().StartSidecarAudio(*sidecar);
+                if (overrideAudio) {
+                    VideoPlayer::GetSingleton().StartOverrideAudio(
+                        *overrideAudio);
                 }
             }
 
@@ -1398,9 +1605,45 @@ namespace BinkHook
             return true;
         }
 
+        if (Config::MainMenuNextAudioKey() != 0 &&
+            key == Config::MainMenuNextAudioKey()) {
+            if (!repeated &&
+                !mainMenuStopped.load(std::memory_order_acquire)) {
+                if (!StartNextDedicatedAudio()) {
+                    spdlog::warn(
+                        "The next-soundtrack hotkey found no supported "
+                        "audio sources");
+                }
+                ShowHelp(3000);
+            }
+            return true;
+        }
+
+        if (Config::MainMenuToggleOriginalAudioKey() != 0 &&
+            key == Config::MainMenuToggleOriginalAudioKey()) {
+            if (!repeated &&
+                !mainMenuStopped.load(std::memory_order_acquire)) {
+                if (player.OriginalAudioPreferred()) {
+                    if (!StartNextDedicatedAudio()) {
+                        spdlog::warn(
+                            "Cannot switch to dedicated audio because "
+                            "the audio library is empty");
+                    }
+                } else {
+                    RestoreOriginalVideoAudio();
+                }
+                ShowHelp(3000);
+            }
+            return true;
+        }
+
         if (Config::MainMenuVolumeUpKey() != 0 &&
             key == Config::MainMenuVolumeUpKey()) {
             player.AdjustVolume(Config::MainMenuVolumeStep());
+            {
+                std::scoped_lock lock(activeBinkMutex);
+                ApplyActiveBinkVolumesLocked();
+            }
             if (Config::MainMenuHelpMilliseconds() != 0) {
                 ShowHelp(2000);
             }
@@ -1410,6 +1653,10 @@ namespace BinkHook
         if (Config::MainMenuVolumeDownKey() != 0 &&
             key == Config::MainMenuVolumeDownKey()) {
             player.AdjustVolume(-Config::MainMenuVolumeStep());
+            {
+                std::scoped_lock lock(activeBinkMutex);
+                ApplyActiveBinkVolumesLocked();
+            }
             if (Config::MainMenuHelpMilliseconds() != 0) {
                 ShowHelp(2000);
             }
@@ -1436,6 +1683,15 @@ namespace BinkHook
         }
         if (!bink) {
             spdlog::error("Could not load bink2w64.dll");
+            return false;
+        }
+
+        originalSetSoundOnOff =
+            reinterpret_cast<BinkSetSoundOnOff>(
+                GetProcAddress(bink, "BinkSetSoundOnOff"));
+        if (!originalSetSoundOnOff) {
+            spdlog::error(
+                "Could not locate BinkSetSoundOnOff in bink2w64.dll");
             return false;
         }
 

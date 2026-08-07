@@ -16,6 +16,14 @@ extern "C"
 
 namespace
 {
+    std::uint64_t NowMilliseconds()
+    {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+    }
+
     std::string Utf8Path(const std::filesystem::path& path)
     {
         const auto utf8 = path.u8string();
@@ -141,10 +149,19 @@ WorldPlaybackSession::~WorldPlaybackSession()
 
 void WorldPlaybackSession::RefreshLibrary()
 {
+    RefreshCatalog();
+    generation_.fetch_add(1, std::memory_order_release);
+    wakeCondition_.notify_all();
+}
+
+void WorldPlaybackSession::RefreshCatalog()
+{
     auto media = library_.Scan();
+    auto catalog = library_.Catalog(media);
     {
         std::scoped_lock lock(stateMutex_);
         media_ = media;
+        catalog_ = std::move(catalog);
         shuffle_.Reset(media_);
     }
     spdlog::info(
@@ -153,22 +170,124 @@ void WorldPlaybackSession::RefreshLibrary()
         media.size(),
         media.size() == 1 ? "" : "s",
         Utf8Path(options_.mediaRoot));
-    generation_.fetch_add(1, std::memory_order_release);
-    wakeCondition_.notify_all();
 }
 
-std::vector<std::string> WorldPlaybackSession::AvailableMedia() const
+std::vector<MediaLibrary::Item>
+WorldPlaybackSession::AvailableMedia() const
 {
     std::scoped_lock lock(stateMutex_);
-    std::vector<std::string> result;
-    result.reserve(media_.size());
-    for (const auto& path : media_) {
-        result.push_back(library_.MediaId(path));
+    return catalog_;
+}
+
+std::size_t WorldPlaybackSession::MediaCount() const
+{
+    std::scoped_lock lock(stateMutex_);
+    return catalog_.size();
+}
+
+std::optional<MediaLibrary::Item> WorldPlaybackSession::MediaAt(
+    const std::size_t index) const
+{
+    std::scoped_lock lock(stateMutex_);
+    return index < catalog_.size() ?
+        std::optional<MediaLibrary::Item>(catalog_[index]) :
+        std::nullopt;
+}
+
+std::optional<MediaProgress> WorldPlaybackSession::Progress(
+    const std::string_view mediaId) const
+{
+    std::scoped_lock lock(stateMutex_);
+    const auto found = progress_.find(std::string(mediaId));
+    return found != progress_.end() &&
+                   found->second.lastPlayedMilliseconds != 0 ?
+        std::optional<MediaProgress>(found->second) :
+        std::nullopt;
+}
+
+std::vector<MediaProgress>
+WorldPlaybackSession::ProgressHistory() const
+{
+    std::scoped_lock lock(stateMutex_);
+    std::vector<MediaProgress> result;
+    result.reserve(progress_.size());
+    for (const auto& entry : progress_) {
+        if (entry.second.lastPlayedMilliseconds != 0) {
+            result.push_back(entry.second);
+        }
     }
+    std::ranges::sort(
+        result,
+        std::greater{},
+        &MediaProgress::lastPlayedMilliseconds);
     return result;
 }
 
+std::optional<MediaProgress>
+WorldPlaybackSession::MostRecentProgress() const
+{
+    auto progress = ProgressHistory();
+    if (progress.empty() ||
+        progress.front().lastPlayedMilliseconds == 0) {
+        return std::nullopt;
+    }
+    return progress.front();
+}
+
+void WorldPlaybackSession::RestoreProgressHistory(
+    std::vector<MediaProgress> progress)
+{
+    std::scoped_lock lock(stateMutex_);
+    progress_.clear();
+    const auto count = std::min<std::size_t>(progress.size(), 2048);
+    for (std::size_t index = 0; index < count; ++index) {
+        auto& item = progress[index];
+        if (item.mediaId.empty() ||
+            !std::isfinite(item.positionSeconds) ||
+            !std::isfinite(item.durationSeconds)) {
+            continue;
+        }
+        item.positionSeconds = std::max(0.0, item.positionSeconds);
+        item.durationSeconds = std::max(0.0, item.durationSeconds);
+        if (item.durationSeconds > 0.0) {
+            item.positionSeconds = std::min(
+                item.positionSeconds,
+                item.durationSeconds);
+        }
+        progress_[item.mediaId] = std::move(item);
+    }
+}
+
+void WorldPlaybackSession::ClearProgressHistory()
+{
+    std::scoped_lock lock(stateMutex_);
+    progress_.clear();
+}
+
 bool WorldPlaybackSession::Select(const std::string_view mediaId)
+{
+    double positionSeconds = 0.0;
+    {
+        std::scoped_lock lock(stateMutex_);
+        const auto found = progress_.find(std::string(mediaId));
+        if (found != progress_.end() &&
+            found->second.lastPlayedMilliseconds != 0 &&
+            !found->second.completed) {
+            positionSeconds = found->second.positionSeconds;
+        }
+    }
+    return QueueSelection(
+        mediaId,
+        positionSeconds,
+        false,
+        true);
+}
+
+bool WorldPlaybackSession::QueueSelection(
+    const std::string_view mediaId,
+    const double positionSeconds,
+    const bool paused,
+    const bool markRecent)
 {
     const auto path = library_.Resolve(mediaId);
     if (!path) {
@@ -179,15 +298,37 @@ bool WorldPlaybackSession::Select(const std::string_view mediaId)
         return false;
     }
 
+    const auto canonicalId = library_.MediaId(*path);
+    const double resumeSeconds = std::max(0.0, positionSeconds);
     {
         std::scoped_lock lock(stateMutex_);
         requestedMedia_ = *path;
+        if (markRecent && !canonicalId.empty()) {
+            auto& progress = progress_[canonicalId];
+            progress.mediaId = canonicalId;
+            progress.lastPlayedMilliseconds = NowMilliseconds();
+            if (progress.completed) {
+                progress.positionSeconds = 0.0;
+                progress.completed = false;
+            }
+        }
     }
+    resumePositionMilliseconds_.store(
+        static_cast<std::int64_t>(resumeSeconds * 1000.0),
+        std::memory_order_release);
+    nextRequested_.store(false, std::memory_order_release);
+    previousRequested_.store(false, std::memory_order_release);
+    seekDeltaMilliseconds_.store(0, std::memory_order_release);
     explicitSelectionPending_.store(true, std::memory_order_release);
     stopped_.store(false, std::memory_order_release);
-    paused_.store(false, std::memory_order_release);
+    paused_.store(paused, std::memory_order_release);
     generation_.fetch_add(1, std::memory_order_release);
     wakeCondition_.notify_all();
+    spdlog::info(
+        "{} queued exact media {} at {:.3f} seconds",
+        PlaybackChannelName(options_.channel),
+        canonicalId,
+        resumeSeconds);
     return true;
 }
 
@@ -197,16 +338,15 @@ bool WorldPlaybackSession::Restore(
     const bool paused,
     const bool loop)
 {
-    resumePositionMilliseconds_.store(
-        static_cast<std::int64_t>(
-            std::max(0.0, positionSeconds) * 1000.0),
-        std::memory_order_release);
     SetLoop(loop);
-    if (!Select(mediaId)) {
+    if (!QueueSelection(
+            mediaId,
+            positionSeconds,
+            paused,
+            false)) {
         resumePositionMilliseconds_.store(0, std::memory_order_release);
         return false;
     }
-    paused_.store(paused, std::memory_order_release);
     return true;
 }
 
@@ -596,6 +736,15 @@ WorldPlaybackSession::DecodeResult WorldPlaybackSession::Decode(
             audioSeekTargetMilliseconds_.store(
                 resumeMilliseconds,
                 std::memory_order_release);
+            spdlog::info(
+                "{} resume seek applied at {:.3f} seconds",
+                PlaybackChannelName(options_.channel),
+                resumeSeconds);
+        } else {
+            spdlog::warn(
+                "{} could not seek to saved position {:.3f} seconds",
+                PlaybackChannelName(options_.channel),
+                resumeSeconds);
         }
     }
 
@@ -758,6 +907,7 @@ WorldPlaybackSession::DecodeResult WorldPlaybackSession::Decode(
             }
 
             auto frame = std::make_shared<VideoFrame>();
+            frame->channel = options_.channel;
             frame->width = options_.outputWidth;
             frame->height = options_.outputHeight;
             frame->rowPitch = frame->width * 4;
@@ -1129,8 +1279,10 @@ void WorldPlaybackSession::UpdateState(
     std::scoped_lock lock(stateMutex_);
     snapshot_.state = state;
     if (!path.empty()) {
-        snapshot_.mediaPath = path;
-        snapshot_.mediaId = library_.MediaId(path);
+        if (snapshot_.mediaPath != path || snapshot_.mediaId.empty()) {
+            snapshot_.mediaPath = path;
+            snapshot_.mediaId = library_.MediaId(path);
+        }
     } else if (state == PlaybackState::kStopped ||
                state == PlaybackState::kNoMedia) {
         snapshot_.mediaPath.clear();
@@ -1140,6 +1292,22 @@ void WorldPlaybackSession::UpdateState(
     snapshot_.durationSeconds = durationSeconds;
     snapshot_.loop = loop_.load(std::memory_order_acquire);
     snapshot_.consumers = consumers_.load(std::memory_order_acquire);
+
+    if (!snapshot_.mediaId.empty() &&
+        durationSeconds > 0.0 &&
+        std::isfinite(positionSeconds) &&
+        std::isfinite(durationSeconds)) {
+        auto& progress = progress_[snapshot_.mediaId];
+        progress.mediaId = snapshot_.mediaId;
+        progress.positionSeconds = std::clamp(
+            positionSeconds,
+            0.0,
+            durationSeconds);
+        progress.durationSeconds = durationSeconds;
+        progress.completed =
+            durationSeconds > 0.0 &&
+            progress.positionSeconds / durationSeconds >= 0.92;
+    }
 }
 
 WorldPlayback& WorldPlayback::GetSingleton()

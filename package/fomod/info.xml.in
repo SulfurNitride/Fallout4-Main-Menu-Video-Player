@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <fomod>
-  <Name>Main Menu Video Player and World Screens</Name>
+  <Name>Main Menu Video Player</Name>
   <Author>SulfurNitride</Author>
   <Version>@PROJECT_VERSION@</Version>
   <Website>https://github.com/SulfurNitride/Fallout4-Main-Menu-Video-Player</Website>
-  <Description>Play ordinary videos or native BK2/XWM pairs on Fallout 4's main menu and watch randomized movie or TV folders on the Pip-Boy. Workshop screen assets are retained as disabled development stubs.</Description>
+  <Description>Play ordinary videos or native BK2/XWM pairs on Fallout 4's main menu, with optional independently randomized soundtracks. The unfinished holotape, Pip-Boy, terminal, and world-screen player is available as an explicitly experimental FOMOD option.</Description>
 </fomod>

@@ -35,14 +35,14 @@ try
     };
     output.ModHeader.Stats.NextFormID = Constants.FirstLightPluginFormId;
 
-    BuildPlugin(fallout4, output);
+    BuildPlugin(fallout4, output, options.ProgramSwf);
 
     output.BeginWrite
         .ToPath(outputPath)
         .WithLoadOrder(fallout4)
         .Write();
 
-    VerifyPlugin(outputPath);
+    VerifyPlugin(outputPath, options.ProgramSwf);
     Console.WriteLine($"Generated {outputPath}");
     return 0;
 }
@@ -52,7 +52,10 @@ catch (Exception exception)
     return 1;
 }
 
-static void BuildPlugin(IFallout4ModGetter fallout4, Fallout4Mod output)
+static void BuildPlugin(
+    IFallout4ModGetter fallout4,
+    Fallout4Mod output,
+    string programSwf)
 {
     var tableTelevision = FindActivatorByModel(
         fallout4,
@@ -117,73 +120,17 @@ static void BuildPlugin(IFallout4ModGetter fallout4, Fallout4Mod output)
             new("c_Wood", 4),
         ]);
 
-    AddPipBoyPlayer(fallout4, output);
+    // Local FormID 808 belonged to the removed craftable terminal. Skip it so
+    // the shipped holotape and quest retain 809/80A in existing saves.
+    output.ModHeader.Stats.NextFormID = Constants.PlayerHolotapeFormId;
+    AddHolotapePlayer(fallout4, output, programSwf);
 }
 
-static void AddPipBoyPlayer(
+static void AddHolotapePlayer(
     IFallout4ModGetter fallout4,
-    Fallout4Mod output)
+    Fallout4Mod output,
+    string programSwf)
 {
-    const string terminalScript =
-        "Fragments:Terminals:TERM_MMVP_PlayerTerminal_00000808";
-
-    var terminal = new Terminal(output)
-    {
-        EditorID = "MMVP_PlayerTerminal",
-        Name = "Main Menu Video Player",
-        HeaderText = "TV AND MOVIE PLAYER",
-        WelcomeText =
-            "TV AND MOVIE LIBRARY\n" +
-            "Choose a folder and video on the player screen.",
-        MenuItems = new(),
-        VirtualMachineAdapter = new VirtualMachineAdapterIndexed
-        {
-            ObjectFormat = 2,
-            ScriptFragments = new ScriptFragmentsIndexed
-            {
-                ExtraBindDataVersion = 3,
-                Script = new ScriptEntry
-                {
-                    Name = terminalScript,
-                    Flags = ScriptEntry.Flag.Local,
-                },
-            },
-        },
-    };
-
-    var commands = new[]
-    {
-        "Play Random Movie",
-        "Play Random TV Episode",
-    };
-    for (ushort index = 1; index <= commands.Length; ++index)
-    {
-        terminal.MenuItems.Add(new TerminalMenuItem
-        {
-            ItemText = commands[index - 1],
-            ResponseText = "Command sent.",
-            Type = TerminalMenuItem.Types.SubmenuForceRedraw,
-            ItemId = index,
-        });
-        terminal.VirtualMachineAdapter.ScriptFragments!.Fragments.Add(
-            new ScriptFragmentIndexed
-            {
-                FragmentIndex = index,
-                Unknown = 0,
-                Unknown2 = 1,
-                ScriptName = terminalScript,
-                FragmentName = $"Fragment_Terminal_{index:00}",
-            });
-    }
-    output.Terminals.Add(terminal);
-
-    if (terminal.FormKey.ID != Constants.PlayerTerminalFormId)
-    {
-        throw new InvalidOperationException(
-            $"The Pip-Boy terminal must use local FormID " +
-            $"{Constants.PlayerTerminalFormId:X3}, got {terminal.FormKey.ID:X3}.");
-    }
-
     var holotapeTemplate = fallout4.Holotapes.FirstOrDefault(record =>
         string.Equals(
             record.EditorID,
@@ -206,10 +153,17 @@ static void AddPipBoyPlayer(
     holotape.VirtualMachineAdapter = null;
     holotape.Value = 0;
     holotape.Weight = 0.0F;
-    var holotapeTerminal = new HolotapeTerminal();
-    holotapeTerminal.Terminal.SetTo(terminal.FormKey);
-    holotape.Data = holotapeTerminal;
+    holotape.Data = new HolotapeProgram
+    {
+        File = programSwf,
+    };
     output.Holotapes.Add(holotape);
+    if (holotape.FormKey.ID != Constants.PlayerHolotapeFormId)
+    {
+        throw new InvalidOperationException(
+            $"The player holotape must retain local FormID " +
+            $"{Constants.PlayerHolotapeFormId:X3}, got {holotape.FormKey.ID:X3}.");
+    }
 
     var questScript = new ScriptEntry
     {
@@ -249,8 +203,8 @@ static void AddPipBoyPlayer(
     output.Quests.Add(quest);
 
     Console.WriteLine(
-        $"Pip-Boy player terminal {terminal.FormKey}, " +
-        $"holotape {holotape.FormKey}, quest {quest.FormKey}");
+        $"Holotape player {holotape.FormKey} ({programSwf}), " +
+        $"quest {quest.FormKey}");
 }
 
 static IActivatorGetter FindActivatorByModel(
@@ -432,9 +386,19 @@ static void ScanMaster(IFallout4ModGetter fallout4)
             $"  {holotape.FormKey} {holotape.EditorID} | " +
             $"terminal={data.Terminal.FormKey}");
     }
+
+    Console.WriteLine("Holotapes backed by program SWFs:");
+    foreach (var holotape in fallout4.Holotapes
+                 .Where(record => record.Data is HolotapeProgram)
+                 .Take(20))
+    {
+        var data = (HolotapeProgram)holotape.Data;
+        Console.WriteLine(
+            $"  {holotape.FormKey} {holotape.EditorID} | file={data.File}");
+    }
 }
 
-static void VerifyPlugin(string path)
+static void VerifyPlugin(string path, string programSwf)
 {
     using var generated = Fallout4Mod.CreateFromBinaryOverlay(
         path,
@@ -475,22 +439,24 @@ static void VerifyPlugin(string path)
         throw new InvalidDataException("The generated plugin does not list Fallout4.esm.");
     }
 
-    var terminal = generated.Terminals.Single();
-    if (terminal.FormKey.ID != Constants.PlayerTerminalFormId ||
-        terminal.MenuItems?.Count != Constants.PlayerCommandCount ||
-        terminal.VirtualMachineAdapter?.ScriptFragments?.Fragments.Count !=
-            Constants.PlayerCommandCount)
+    if (generated.Terminals.Any() ||
+        generated.ConstructibleObjects.Any(record =>
+            record.EditorID == "MMVP_co_PlayerTerminal"))
     {
         throw new InvalidDataException(
-            "The Pip-Boy terminal menu or Papyrus fragments are incomplete.");
+            "The removed MMVP workshop terminal is still present.");
     }
 
     var holotape = generated.Holotapes.Single();
-    if (holotape.Data is not IHolotapeTerminalGetter holotapeData ||
-        holotapeData.Terminal.FormKey != terminal.FormKey)
+    if (holotape.FormKey.ID != Constants.PlayerHolotapeFormId ||
+        holotape.Data is not IHolotapeProgramGetter programData ||
+        !string.Equals(
+            programData.File,
+            programSwf,
+            StringComparison.OrdinalIgnoreCase))
     {
         throw new InvalidDataException(
-            "The player holotape does not launch the MMVP terminal.");
+            $"The player holotape does not launch '{programSwf}'.");
     }
 
     var quest = generated.Quests.Single();
@@ -520,13 +486,21 @@ static bool IsRelevantModel(string path) =>
     path.Contains("projector", StringComparison.OrdinalIgnoreCase) ||
     path.Contains("driveinscreen", StringComparison.OrdinalIgnoreCase);
 
-internal sealed record Options(string DataDirectory, string OutputPath, bool Scan)
+internal sealed record Options(
+    string DataDirectory,
+    string OutputPath,
+    bool Scan,
+    string ProgramSwf)
 {
     public static Options Parse(string[] args)
     {
         string? dataDirectory = null;
-        var outputPath = Path.Combine("package", "common", Constants.PluginFileName);
+        var outputPath = Path.Combine(
+            "package",
+            "experimental",
+            Constants.PluginFileName);
         var scan = false;
+        var programSwf = "MMVPBrowser.swf";
 
         for (var index = 0; index < args.Length; ++index)
         {
@@ -540,6 +514,9 @@ internal sealed record Options(string DataDirectory, string OutputPath, bool Sca
                     break;
                 case "--scan":
                     scan = true;
+                    break;
+                case "--program-swf":
+                    programSwf = RequireValue(args, ref index, "--program-swf");
                     break;
                 case "--help":
                 case "-h":
@@ -555,11 +532,25 @@ internal sealed record Options(string DataDirectory, string OutputPath, bool Sca
         {
             throw new ArgumentException("--data-dir is required.");
         }
+        if (!string.Equals(
+                Path.GetExtension(programSwf),
+                ".swf",
+                StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(
+                Path.GetFileName(programSwf),
+                programSwf,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "--program-swf must be one bare SWF filename, " +
+                "for example MMVPBrowser.swf.");
+        }
 
         return new Options(
             Path.GetFullPath(dataDirectory),
             Path.GetFullPath(outputPath),
-            scan);
+            scan,
+            programSwf);
     }
 
     private static string RequireValue(string[] args, ref int index, string option)
@@ -581,9 +572,14 @@ internal sealed record Options(string DataDirectory, string OutputPath, bool Sca
             Usage:
               dotnet run --project tools/WorldPluginGenerator -- \
                 --data-dir "/path/to/Fallout 4/Data" \
-                [--output package/common/MMVP_WorldScreens.esp]
+                [--output package/experimental/MMVP_WorldScreens.esp] \
+                [--program-swf MMVPBrowser.swf]
               dotnet run --project tools/WorldPluginGenerator -- \
                 --data-dir "/path/to/Fallout 4/Data" --scan
+
+            The holotape is always a direct SWF program usable through the
+            Pip-Boy or any vanilla terminal that supports Load Holotape.
+            --program-swf defaults to MMVPBrowser.swf.
             """);
     }
 }
@@ -593,9 +589,8 @@ internal static class Constants
     public const string PluginFileName = "MMVP_WorldScreens.esp";
     public const uint FirstLightPluginFormId = 0x800;
     public const uint LastLightPluginFormId = 0xFFF;
-    public const uint PlayerTerminalFormId = 0x808;
-    public const int PlayerCommandCount = 2;
-    public const int ExpectedRecordCount = 11;
+    public const uint PlayerHolotapeFormId = 0x809;
+    public const int ExpectedRecordCount = 10;
 }
 
 internal sealed record MaterialCost(string EditorId, uint Count);

@@ -243,22 +243,27 @@ VideoPlayer& VideoPlayer::GetSingleton()
 
 VideoPlayer::VideoPlayer() :
     random_(std::random_device{}()),
+    audioRandom_(std::random_device{}()),
     worker_([this](std::stop_token stopToken) {
         Worker(stopToken);
     }),
-    sidecarWorker_([this](std::stop_token stopToken) {
-        SidecarWorker(stopToken);
+    overrideAudioWorker_([this](std::stop_token stopToken) {
+        OverrideAudioWorker(stopToken);
     })
 {
     volume_.store(Config::MainMenuVolume(), std::memory_order_release);
+    // A populated MainMenuAudio folder opts into the dedicated soundtrack.
+    // If it is empty, selection safely falls back to the video's audio.
+    originalAudioPreferred_.store(false, std::memory_order_release);
+    originalAudioAudible_.store(false, std::memory_order_release);
 }
 
 VideoPlayer::~VideoPlayer()
 {
     worker_.request_stop();
-    sidecarWorker_.request_stop();
+    overrideAudioWorker_.request_stop();
     wakeCondition_.notify_all();
-    sidecarCondition_.notify_all();
+    overrideAudioCondition_.notify_all();
 }
 
 void VideoPlayer::OnNativeVideoOpened(
@@ -290,27 +295,77 @@ void VideoPlayer::OnNativeVideoClosed()
     wakeCondition_.notify_all();
 }
 
-void VideoPlayer::StartSidecarAudio(
+void VideoPlayer::StartOverrideAudio(
     const std::filesystem::path& path)
 {
     {
-        std::scoped_lock lock(sidecarMutex_);
-        sidecarPath_ = path;
+        std::scoped_lock lock(overrideAudioMutex_);
+        overrideAudioPath_ = path;
     }
-    sidecarActive_.store(true, std::memory_order_release);
-    sidecarSession_.fetch_add(1, std::memory_order_release);
-    sidecarCondition_.notify_all();
+    overrideAudioActive_.store(true, std::memory_order_release);
+    overrideAudioSession_.fetch_add(1, std::memory_order_release);
+    overrideAudioCondition_.notify_all();
 }
 
-void VideoPlayer::StopSidecarAudio()
+void VideoPlayer::StopOverrideAudio()
 {
     {
-        std::scoped_lock lock(sidecarMutex_);
-        sidecarPath_.reset();
+        std::scoped_lock lock(overrideAudioMutex_);
+        overrideAudioPath_.reset();
     }
-    sidecarActive_.store(false, std::memory_order_release);
-    sidecarSession_.fetch_add(1, std::memory_order_release);
-    sidecarCondition_.notify_all();
+    overrideAudioActive_.store(false, std::memory_order_release);
+    overrideAudioSession_.fetch_add(1, std::memory_order_release);
+    overrideAudioCondition_.notify_all();
+}
+
+std::optional<std::filesystem::path>
+VideoPlayer::PickDedicatedAudio()
+{
+    const auto directory = Config::MainMenuAudioDirectory();
+    const MediaLibrary library(
+        directory,
+        Config::RecursiveMediaScan());
+    auto sources = library.ScanAudioSources();
+    if (sources.empty()) {
+        spdlog::warn(
+            "No supported dedicated main-menu audio sources were found "
+            "audio sources were found in {}",
+            Utf8Path(directory));
+        return std::nullopt;
+    }
+
+    std::scoped_lock lock(audioSelectionMutex_);
+    std::ranges::shuffle(sources, audioRandom_);
+    if (sources.size() > 1 && sources.front() == previousAudio_) {
+        std::swap(sources.front(), sources[1]);
+    }
+    previousAudio_ = sources.front();
+    spdlog::info(
+        "Selected dedicated main-menu audio: {}",
+        Utf8Path(previousAudio_));
+    return previousAudio_;
+}
+
+void VideoPlayer::SetOriginalAudioPreferred(
+    const bool enabled) noexcept
+{
+    originalAudioPreferred_.store(enabled, std::memory_order_release);
+}
+
+bool VideoPlayer::OriginalAudioPreferred() const noexcept
+{
+    return originalAudioPreferred_.load(std::memory_order_acquire);
+}
+
+void VideoPlayer::SetOriginalAudioAudible(
+    const bool enabled) noexcept
+{
+    originalAudioAudible_.store(enabled, std::memory_order_release);
+}
+
+bool VideoPlayer::OriginalAudioAudible() const noexcept
+{
+    return originalAudioAudible_.load(std::memory_order_acquire);
 }
 
 void VideoPlayer::AdjustVolume(const float delta)
@@ -426,24 +481,25 @@ bool VideoPlayer::SessionActive(const std::uint64_t session) const
            session_.load(std::memory_order_acquire) == session;
 }
 
-bool VideoPlayer::SidecarSessionActive(
+bool VideoPlayer::OverrideAudioSessionActive(
     const std::uint64_t session) const
 {
-    return sidecarActive_.load(std::memory_order_acquire) &&
-           sidecarSession_.load(std::memory_order_acquire) == session;
+    return overrideAudioActive_.load(std::memory_order_acquire) &&
+           overrideAudioSession_.load(std::memory_order_acquire) ==
+               session;
 }
 
-void VideoPlayer::SidecarWorker(std::stop_token stopToken)
+void VideoPlayer::OverrideAudioWorker(std::stop_token stopToken)
 {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     std::uint64_t handledSession = 0;
 
     while (!stopToken.stop_requested()) {
         {
-            std::unique_lock lock(sidecarMutex_);
-            sidecarCondition_.wait(lock, stopToken, [&] {
-                return sidecarSession_.load(std::memory_order_acquire) !=
-                       handledSession;
+            std::unique_lock lock(overrideAudioMutex_);
+            overrideAudioCondition_.wait(lock, stopToken, [&] {
+                return overrideAudioSession_.load(
+                           std::memory_order_acquire) != handledSession;
             });
         }
         if (stopToken.stop_requested()) {
@@ -451,22 +507,22 @@ void VideoPlayer::SidecarWorker(std::stop_token stopToken)
         }
 
         handledSession =
-            sidecarSession_.load(std::memory_order_acquire);
-        if (!sidecarActive_.load(std::memory_order_acquire)) {
+            overrideAudioSession_.load(std::memory_order_acquire);
+        if (!overrideAudioActive_.load(std::memory_order_acquire)) {
             continue;
         }
 
         std::optional<std::filesystem::path> path;
         {
-            std::scoped_lock lock(sidecarMutex_);
-            path = sidecarPath_;
+            std::scoped_lock lock(overrideAudioMutex_);
+            path = overrideAudioPath_;
         }
         if (!path) {
             continue;
         }
 
         spdlog::info(
-            "Starting main-menu XWM sidecar: {}",
+            "Starting main-menu override audio: {}",
             Utf8Path(*path));
         DecodeAudioSession(*path, handledSession, stopToken, true);
     }
@@ -476,19 +532,19 @@ void VideoPlayer::DecodeAudioSession(
     const std::filesystem::path& path,
     const std::uint64_t session,
     std::stop_token stopToken,
-    const bool sidecar)
+    const bool overrideAudio)
 {
     constexpr int kOutputSampleRate{ 48000 };
     constexpr int kOutputChannels{ 2 };
     constexpr AVSampleFormat kOutputFormat{ AV_SAMPLE_FMT_S16 };
 
     const auto sessionActive = [&] {
-        return sidecar ?
-            SidecarSessionActive(session) :
+        return overrideAudio ?
+            OverrideAudioSessionActive(session) :
             SessionActive(session);
     };
 
-    while (!sidecar &&
+    while (!overrideAudio &&
            !stopToken.stop_requested() &&
            sessionActive() &&
            !GetLatestFrame()) {
@@ -595,7 +651,10 @@ void VideoPlayer::DecodeAudioSession(
         cleanUp();
         return;
     }
-    output.SetVolume(Volume());
+    output.SetVolume(
+        overrideAudio || OriginalAudioAudible() ?
+            Volume() :
+            0.0F);
 
     spdlog::info(
         "Playing audio stream {} with {} decoder: {} Hz, {} channels",
@@ -620,7 +679,10 @@ void VideoPlayer::DecodeAudioSession(
             }
         }
 
-        output.SetVolume(Volume());
+        output.SetVolume(
+            overrideAudio || OriginalAudioAudible() ?
+                Volume() :
+                0.0F);
         result = av_read_frame(format, packet);
         if (result < 0) {
             const std::int64_t seekTarget =
@@ -986,6 +1048,7 @@ bool VideoPlayer::DecodeSession(
             }
 
             auto frame = std::make_shared<VideoFrame>();
+            frame->channel = PlaybackChannel::kMainMenu;
             frame->width = outputWidth;
             frame->height = outputHeight;
             frame->rowPitch = frame->width * 4;

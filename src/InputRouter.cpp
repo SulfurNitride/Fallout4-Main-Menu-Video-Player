@@ -11,6 +11,7 @@ namespace InputRouter
         std::mutex hookMutex;
         HWND falloutWindow{ nullptr };
         WNDPROC originalWindowProcedure{ nullptr };
+        bool rawInputCaptured{ false };
 
         BOOL CALLBACK FindProcessWindow(
             const HWND window,
@@ -52,8 +53,13 @@ namespace InputRouter
             if (PipBoyPlayer::HandleWindowMessage(
                     message,
                     wParam,
-                    lParam) ||
-                BinkHook::HandleWindowMessage(
+                    lParam)) {
+                if (message == WM_INPUT) {
+                    DefWindowProcW(window, message, wParam, lParam);
+                }
+                return 0;
+            }
+            if (BinkHook::HandleWindowMessage(
                     message,
                     wParam,
                     lParam)) {
@@ -105,6 +111,54 @@ namespace InputRouter
         }
 
         spdlog::info("Installed shared main-menu/Pip-Boy input router");
+        rawInputCaptured = false;
+        return true;
+    }
+
+    bool SetRawInputCapture(const bool enabled)
+    {
+        if (enabled && !Install()) {
+            return false;
+        }
+
+        std::scoped_lock lock(hookMutex);
+        if (!IsWindow(falloutWindow)) {
+            rawInputCaptured = false;
+            return !enabled;
+        }
+        if (rawInputCaptured == enabled) {
+            return true;
+        }
+
+        RAWINPUTDEVICE devices[2]{};
+        devices[0].usUsagePage = 0x01;
+        devices[0].usUsage = 0x06;
+        devices[0].dwFlags = enabled ? RIDEV_INPUTSINK : 0;
+        devices[0].hwndTarget = falloutWindow;
+        devices[1].usUsagePage = 0x01;
+        devices[1].usUsage = 0x02;
+        devices[1].dwFlags = enabled ? RIDEV_INPUTSINK : 0;
+        devices[1].hwndTarget = falloutWindow;
+
+        if (!RegisterRawInputDevices(
+                devices,
+                static_cast<UINT>(std::size(devices)),
+                sizeof(RAWINPUTDEVICE))) {
+            spdlog::error(
+                "Could not {} MMVP raw keyboard/mouse capture: {}",
+                enabled ? "register" : "restore",
+                GetLastError());
+            return false;
+        }
+
+        rawInputCaptured = enabled;
+        if (enabled) {
+            spdlog::info(
+                "Registered Holo-Wind-style raw keyboard/mouse input sink");
+        } else {
+            spdlog::info(
+                "Restored Fallout raw keyboard/mouse input registration");
+        }
         return true;
     }
 

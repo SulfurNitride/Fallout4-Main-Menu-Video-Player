@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     MainMenuVideoPlayer
-    VERSION 0.1.1
+    VERSION 0.1.2
     LANGUAGES CXX RC
 )
 
@@ -198,6 +198,7 @@ target_link_libraries(mmvp_audio_smoke PRIVATE
 set(PACKAGE_ROOT "${CMAKE_BINARY_DIR}/package")
 set(PACKAGE_INSTALLER "${PACKAGE_ROOT}/installer")
 set(PACKAGE_COMMON "${CMAKE_SOURCE_DIR}/package/common")
+set(PACKAGE_EXPERIMENTAL "${CMAKE_SOURCE_DIR}/package/experimental")
 set(PACKAGE_ARCHIVE
     "${CMAKE_BINARY_DIR}/${PROJECT_NAME}-${PROJECT_VERSION}-FOMOD.zip")
 set(GENERATED_ASSET_ROOT "${CMAKE_BINARY_DIR}/generated-assets")
@@ -250,31 +251,35 @@ add_custom_target(package_mod
     COMMAND "${CMAKE_COMMAND}" -E make_directory
             "${PACKAGE_INSTALLER}/common"
             "${PACKAGE_INSTALLER}/fomod"
+            "${PACKAGE_INSTALLER}/legal/licenses"
+            "${PACKAGE_INSTALLER}/experimental/Textures/MMVP/World"
             "${PACKAGE_INSTALLER}/runtime/OG/F4SE/Plugins"
             "${PACKAGE_INSTALLER}/runtime/NG/F4SE/Plugins"
             "${PACKAGE_INSTALLER}/runtime/AE/F4SE/Plugins"
-            "${PACKAGE_INSTALLER}/common/Textures/MMVP/World"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
             "${PACKAGE_COMMON}"
             "${PACKAGE_INSTALLER}/common"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${PACKAGE_EXPERIMENTAL}"
+            "${PACKAGE_INSTALLER}/experimental"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${TELEVISION_SCREEN_DDS}"
-            "${PACKAGE_INSTALLER}/common/Textures/MMVP/World/TelevisionScreenOutput1_d.dds"
+            "${PACKAGE_INSTALLER}/experimental/Textures/MMVP/World/TelevisionScreenOutput1_d.dds"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${PROJECTOR_SCREEN_DDS}"
-            "${PACKAGE_INSTALLER}/common/Textures/MMVP/World/MovieProjectorScreenOutput00001_d.dds"
+            "${PACKAGE_INSTALLER}/experimental/Textures/MMVP/World/MovieProjectorScreenOutput00001_d.dds"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_SOURCE_DIR}/README.md"
             "${PACKAGE_INSTALLER}/common/README.md"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_SOURCE_DIR}/LICENSE"
-            "${PACKAGE_INSTALLER}/common/LICENSE"
+            "${PACKAGE_INSTALLER}/legal/LICENSE"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.txt"
-            "${PACKAGE_INSTALLER}/common/THIRD_PARTY_NOTICES.txt"
+            "${PACKAGE_INSTALLER}/legal/THIRD_PARTY_NOTICES.txt"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
             "${CMAKE_SOURCE_DIR}/licenses"
-            "${PACKAGE_INSTALLER}/common/licenses"
+            "${PACKAGE_INSTALLER}/legal/licenses"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_BINARY_DIR}/generated-fomod/info.xml"
             "${PACKAGE_INSTALLER}/fomod/info.xml"
@@ -292,7 +297,7 @@ add_custom_target(package_mod
             "${PACKAGE_INSTALLER}/runtime/AE/F4SE/Plugins/MainMenuVideoPlayer.dll"
     COMMAND "${CMAKE_COMMAND}" -E chdir "${PACKAGE_INSTALLER}"
             "${CMAKE_COMMAND}" -E tar cf "${PACKAGE_ARCHIVE}" --format=zip --
-            fomod common runtime
+            fomod common experimental legal runtime
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     BYPRODUCTS "${PACKAGE_ARCHIVE}"
     DEPENDS

@@ -7,7 +7,10 @@ The TV and projector workshop objects are included as disabled previews for futu
 ## Requirements
 
 - Fallout 4 Script Extender (F4SE)
-- `MMVP_WorldScreens.esp` enabled in your load order
+
+The main-menu player does not require an ESP. The optional
+`MMVP_WorldScreens.esp` belongs to the experimental holotape/world-screen
+prototype only.
 
 Choose the FOMOD option matching your game:
 
@@ -23,28 +26,38 @@ Address Library is not required.
 
 1. Install the FOMOD with Mod Organizer 2 or another compatible mod manager.
 2. Choose the option matching your `Fallout4.exe` version.
-3. Enable `MMVP_WorldScreens.esp`.
-4. Let this mod win any conflict for `Video/MainMenuLoop.bk2`.
-5. Add your videos to the folders listed below.
-6. Launch Fallout 4 through F4SE.
+3. Choose **Main-menu player only — Recommended** unless you intentionally
+   want to test the unfinished holotape player on a disposable save.
+4. If you select the experimental option, enable `MMVP_WorldScreens.esp`.
+5. Let this mod win any conflict for `Video/MainMenuLoop.bk2`.
+6. Add your videos to the folders listed below.
+7. Launch Fallout 4 through F4SE.
 
 ## Video folders
 
 | Folder | Used for |
 | --- | --- |
 | `Data/MainMenuVideos` | Main-menu videos |
-| `Data/MovieVideos` | Pip-Boy movies |
-| `Data/TVVideos` | Pip-Boy shows |
+| `Data/MainMenuAudio` | Optional independent main-menu soundtracks |
+| `Data/MovieVideos` | Experimental Pip-Boy movies |
+| `Data/TVVideos` | Experimental Pip-Boy shows |
 
-Subfolders are supported.
+The recommended main-menu-only installation creates `MainMenuVideos` and
+`MainMenuAudio`. The experimental FOMOD option additionally creates
+`MovieVideos` and `TVVideos`. Subfolders are supported.
 
 Common formats such as MP4, MKV, AVI, MOV, WebM, WMV, and MPEG are supported. The main-menu folder also supports native Fallout 4 BK2 videos.
 
 ## Pip-Boy player
 
-The **Main Menu Video Player** holotape is automatically added to your inventory. Find it under **Inventory > Misc**, load it, and choose a random movie or TV show.
+The Pip-Boy/terminal player is an explicitly experimental FOMOD option. It is
+not installed by the recommended main-menu-only choice. The experimental path
+adds the **Main Menu Video Player** holotape through an ESP-FE quest and loads
+the browser/player SWFs through Fallout's holotape-program system.
 
-Move the mouse to show the playback controls. You can seek, pause, play the previous or next video, and stop playback. Press Tab or Escape to leave the player.
+This prototype is still being tested against custom Pip-Boys, terminals, UI
+mods, and all supported runtimes. Use a test save and include the F4SE log plus
+a crash log when reporting a failure.
 
 ## Main-menu controls
 
@@ -54,10 +67,16 @@ Move the mouse to show the playback controls. You can seek, pause, play the prev
 | Backspace | Stop the video |
 | Page Up | Increase video volume |
 | Page Down | Decrease video volume |
+| N | Play another dedicated soundtrack |
+| M | Toggle dedicated/original video audio |
 
 The hotkeys can be changed or disabled in `Data/F4SE/Plugins/MainMenuVideoPlayer.ini`.
 
 ## BK2 audio
+
+Audio tracks embedded in a selected BK2 obey `MainMenuVolume` and the Page Up
+and Page Down volume controls. MMVP preserves Fallout's own per-track volume
+and applies its volume as a multiplier; silent BK2 files remain silent.
 
 If a BK2 video has no built-in audio, place an XWM file beside it with the same name:
 
@@ -66,7 +85,23 @@ AwesomeVideo.bk2
 AwesomeVideo.xwm
 ```
 
-Do not add an XWM sidecar when the BK2 already has audio unless you intentionally want both tracks to play.
+A matching XWM is an explicit audio override. MMVP disables all audio embedded
+in that BK2 before playback begins and plays only the XWM soundtrack. This
+same-name sidecar behavior applies when no dedicated soundtrack is playing.
+
+## Dedicated main-menu audio
+
+Put audio-capable files in `Data/MainMenuAudio`; MMVP detects the library
+automatically. It accepts standalone audio such as MP3, FLAC, OGG,
+Opus, WAV, WMA, XMA, and XWM, plus video containers such as MP4, MKV, WebM,
+AVI, MOV, and BK2. It ignores the video stream and plays the first decodable
+audio stream.
+
+The selected soundtrack loops, avoids an immediate repeat, and replaces the
+video's original audio. Press N for another soundtrack. Press M to switch
+exclusively between the dedicated soundtrack and the current video's original
+audio. If the dedicated folder is empty, MMVP safely falls back to original
+video audio.
 
 ## TV and projector previews
 
