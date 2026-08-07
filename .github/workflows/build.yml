@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Prepare MSYS2 tools for FFmpeg
         id: msys2
@@ -82,7 +82,8 @@ jobs:
           .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
+        id: vcpkg-cache
+        uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}\vcpkg-binary-cache
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/x64-windows-static-md.cmake') }}
@@ -194,15 +195,15 @@ jobs:
 
       - name: Upload FOMOD
         if: github.event_name != 'schedule'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: MainMenuVideoPlayer-FOMOD
           path: build/windows-ci/package/installer/
           if-no-files-found: error
 
       - name: Save vcpkg binary cache
-        if: always()
-        uses: actions/cache/save@v4
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}\vcpkg-binary-cache
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/x64-windows-static-md.cmake') }}
