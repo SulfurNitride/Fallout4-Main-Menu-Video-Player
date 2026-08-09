@@ -16,6 +16,12 @@ public:
     void StopOverrideAudio();
     [[nodiscard]] std::optional<std::filesystem::path>
         PickDedicatedAudio();
+    [[nodiscard]] std::optional<std::filesystem::path>
+        PickDedicatedAudioForVideo(
+            const std::filesystem::path& video,
+            bool allowRandomFallback);
+    [[nodiscard]] bool HasDecodableAudioTrack(
+        const std::filesystem::path& path) const;
     void SetOriginalAudioPreferred(bool enabled) noexcept;
     [[nodiscard]] bool OriginalAudioPreferred() const noexcept;
     void SetOriginalAudioAudible(bool enabled) noexcept;

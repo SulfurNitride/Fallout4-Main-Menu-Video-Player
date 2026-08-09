@@ -770,21 +770,16 @@ namespace BinkHook
             std::optional<std::filesystem::path> overrideAudio;
             bool dedicatedAudio = false;
             if (!player.OriginalAudioPreferred()) {
-                overrideAudio = player.PickDedicatedAudio();
+                overrideAudio = player.PickDedicatedAudioForVideo(
+                    selection,
+                    false);
                 dedicatedAudio = overrideAudio.has_value();
-                if (!overrideAudio) {
-                    player.SetOriginalAudioPreferred(true);
-                    spdlog::warn(
-                        "Falling back to the selected video's original "
-                        "audio because the dedicated library is empty");
-                }
             }
             if (!overrideAudio &&
-                player.OriginalAudioPreferred() &&
+                !player.OriginalAudioPreferred() &&
                 binkSelection) {
                 overrideAudio = FindXwmSidecar(selection);
             }
-            player.SetOriginalAudioAudible(!overrideAudio.has_value());
 
             if (binkSelection) {
                 const std::string path = Utf8Path(selection);
@@ -800,6 +795,16 @@ namespace BinkHook
                         path);
                     return false;
                 }
+
+                const auto* header =
+                    static_cast<const PublicBinkHeader*>(selectedBink);
+                if (!overrideAudio && header->numberOfTracks == 0) {
+                    overrideAudio = player.PickDedicatedAudioForVideo(
+                        selection,
+                        true);
+                    dedicatedAudio = overrideAudio.has_value();
+                }
+                player.SetOriginalAudioAudible(!overrideAudio.has_value());
 
                 // Keep Bink's sound path running even while it is inaudible.
                 // Some files use the audio clock to advance video frames and
@@ -831,8 +836,6 @@ namespace BinkHook
                     ApplyActiveBinkVolumesLocked();
                 }
                 CloseDetachedBink(replaced);
-                const auto* header =
-                    static_cast<const PublicBinkHeader*>(selectedBink);
                 spdlog::info(
                     "Opened BK2 overlay {} ({}x{}) over carrier {}",
                     path,
@@ -841,6 +844,14 @@ namespace BinkHook
                     owner);
 
             } else {
+                if (!overrideAudio &&
+                    !player.HasDecodableAudioTrack(selection)) {
+                    overrideAudio = player.PickDedicatedAudioForVideo(
+                        selection,
+                        true);
+                    dedicatedAudio = overrideAudio.has_value();
+                }
+                player.SetOriginalAudioAudible(!overrideAudio.has_value());
                 void* replaced = nullptr;
                 {
                     std::scoped_lock lock(activeBinkMutex);

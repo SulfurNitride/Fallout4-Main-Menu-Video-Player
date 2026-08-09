@@ -329,7 +329,7 @@ VideoPlayer::PickDedicatedAudio()
     if (sources.empty()) {
         spdlog::warn(
             "No supported dedicated main-menu audio sources were found "
-            "audio sources were found in {}",
+            "in {}",
             Utf8Path(directory));
         return std::nullopt;
     }
@@ -344,6 +344,87 @@ VideoPlayer::PickDedicatedAudio()
         "Selected dedicated main-menu audio: {}",
         Utf8Path(previousAudio_));
     return previousAudio_;
+}
+
+std::optional<std::filesystem::path>
+VideoPlayer::PickDedicatedAudioForVideo(
+    const std::filesystem::path& video,
+    const bool allowRandomFallback)
+{
+    const auto directory = Config::MainMenuAudioDirectory();
+    const MediaLibrary library(
+        directory,
+        Config::RecursiveMediaScan());
+    auto sources = library.ScanAudioSources();
+    if (sources.empty()) {
+        if (allowRandomFallback) {
+            spdlog::warn(
+                "No supported dedicated main-menu audio sources were found "
+                "in {}",
+                Utf8Path(directory));
+        }
+        return std::nullopt;
+    }
+
+    const std::wstring videoStem = video.stem().wstring();
+    const auto matching = std::ranges::find_if(
+        sources,
+        [&](const std::filesystem::path& source) {
+            const std::wstring sourceStem = source.stem().wstring();
+            return std::ranges::equal(
+                videoStem,
+                sourceStem,
+                [](const wchar_t left, const wchar_t right) {
+                    return std::towlower(left) == std::towlower(right);
+                });
+        });
+    if (matching != sources.end()) {
+        std::scoped_lock lock(audioSelectionMutex_);
+        previousAudio_ = *matching;
+        spdlog::info(
+            "Selected same-name main-menu audio for {}: {}",
+            Utf8Path(video.filename()),
+            Utf8Path(previousAudio_));
+        return previousAudio_;
+    }
+
+    if (!allowRandomFallback) {
+        return std::nullopt;
+    }
+
+    std::scoped_lock lock(audioSelectionMutex_);
+    std::ranges::shuffle(sources, audioRandom_);
+    if (sources.size() > 1 && sources.front() == previousAudio_) {
+        std::swap(sources.front(), sources[1]);
+    }
+    previousAudio_ = sources.front();
+    spdlog::info(
+        "Selected random main-menu audio for silent video {}: {}",
+        Utf8Path(video.filename()),
+        Utf8Path(previousAudio_));
+    return previousAudio_;
+}
+
+bool VideoPlayer::HasDecodableAudioTrack(
+    const std::filesystem::path& path) const
+{
+    AVFormatContext* format = nullptr;
+    const std::string nativePath = Utf8Path(path);
+    const int opened = avformat_open_input(
+        &format,
+        nativePath.c_str(),
+        nullptr,
+        nullptr);
+    if (opened < 0 || !format) {
+        avformat_close_input(&format);
+        return false;
+    }
+
+    const int stream = FindAudioStream(format);
+    const bool decodable = stream >= 0 &&
+        avcodec_find_decoder(format->streams[stream]->codecpar->codec_id);
+    avformat_close_input(&format);
+    return decodable;
 }
 
 void VideoPlayer::SetOriginalAudioPreferred(
@@ -585,7 +666,23 @@ void VideoPlayer::DecodeAudioSession(
         return;
     }
 
-    const int audioStream = FindAudioStream(format);
+    int audioStream = FindAudioStream(format);
+    if (audioStream >= 0) {
+        const AVCodecParameters* parameters =
+            format->streams[audioStream]->codecpar;
+        if (parameters->sample_rate <= 0 || parameters->channels <= 0) {
+            result = avformat_find_stream_info(format, nullptr);
+            if (result < 0) {
+                spdlog::error(
+                    "FFmpeg could not probe audio stream metadata in {}: {}",
+                    nativePath,
+                    AvError(result));
+                cleanUp();
+                return;
+            }
+            audioStream = FindAudioStream(format);
+        }
+    }
     AVCodec* codec = audioStream >= 0 ?
         avcodec_find_decoder(
             format->streams[audioStream]->codecpar->codec_id) :

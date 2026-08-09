@@ -24,9 +24,10 @@ every selected file's actual audio-track IDs instead of assuming track numbers,
 so BK2 files with different track layouts remain safe. When an XWM sidecar is
 present, it takes priority: MMVP keeps the BK2 audio clock running but sets
 every embedded track to zero volume, then plays only the XWM soundtrack.
-If MainMenuAudio contains a supported file, that dedicated library takes
-priority instead. Same-name sidecars remain ignored while it plays; M restores
-the video's own embedded/original audio stream.
+If MainMenuAudio contains a supported file with the same basename as the video,
+that paired soundtrack takes priority. Without a same-name file, MMVP keeps the
+video's embedded audio; a silent video receives a random MainMenuAudio track.
+M restores the video's own embedded/original audio stream when one exists.
 
 Default main-menu controls:
 

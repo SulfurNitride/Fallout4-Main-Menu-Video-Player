@@ -9,7 +9,7 @@ namespace
     bool muteVanillaMenuMusic{ true };
     bool recursiveMediaScan{ true };
     bool enableWorldScreens{ false };
-    bool enablePipBoyPlayer{ true };
+    bool enablePipBoyPlayer{ false };
     std::filesystem::path mainMenuDirectory{
         "Data/MainMenuVideos"
     };
@@ -152,7 +152,7 @@ void Config::Load(const HMODULE module)
     enablePipBoyPlayer = ReadBoolean(
         path,
         L"EnablePipBoyPlayer",
-        true);
+        false);
     mainMenuDirectory = ReadPath(
         path,
         L"MainMenuDirectory",

@@ -99,11 +99,12 @@ Opus, WAV, WMA, XMA, and XWM, plus video containers such as MP4, MKV, WebM,
 AVI, MOV, and BK2. It ignores the video stream and plays the first decodable
 audio stream.
 
-The selected soundtrack loops, avoids an immediate repeat, and replaces the
-video's original audio. Press N for another soundtrack. Press M to switch
-exclusively between the dedicated soundtrack and the current video's original
-audio. If the dedicated folder is empty, MMVP safely falls back to original
-video audio.
+An audio file whose basename matches the selected video is treated as its
+soundtrack and replaces embedded audio. If no same-name soundtrack exists,
+MMVP keeps decodable embedded audio; for a silent video it selects a random
+file from `MainMenuAudio` and avoids an immediate repeat. Press N for another
+random soundtrack. Press M to switch between dedicated and original video
+audio when both are available.
 
 ## TV and projector previews
 

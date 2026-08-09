@@ -55,7 +55,7 @@
             <plugin name="Experimental holotape and world screens">
               <description>Installs the TVVideos and MovieVideos folders, ESP-FE, MMVP holotape, browser/player SWFs, and unfinished world-screen assets. This path is under active development and may crash or conflict with Pip-Boy, terminal, input, or UI mods. Use a test save.</description>
               <files>
-                <folder source="experimental" destination="" priority="0" />
+                <folder source="experimental" destination="" priority="1" />
               </files>
               <typeDescriptor>
                 <type name="Optional" />
