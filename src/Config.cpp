@@ -8,27 +8,12 @@ namespace
     bool keepPlayingWhenBorderless{ true };
     bool muteVanillaMenuMusic{ true };
     bool recursiveMediaScan{ true };
-    bool enableWorldScreens{ false };
-    bool enablePipBoyPlayer{ false };
     std::filesystem::path mainMenuDirectory{
         "Data/MainMenuVideos"
     };
     std::filesystem::path mainMenuAudioDirectory{
         "Data/MainMenuAudio"
     };
-    std::filesystem::path televisionDirectory{
-        "Data/TVVideos"
-    };
-    std::filesystem::path movieDirectory{
-        "Data/MovieVideos"
-    };
-    std::uint32_t televisionWidth{ 1024 };
-    std::uint32_t televisionHeight{ 576 };
-    std::uint32_t projectorWidth{ 1920 };
-    std::uint32_t projectorHeight{ 1080 };
-    std::uint32_t pipBoyWidth{ 876 };
-    std::uint32_t pipBoyHeight{ 700 };
-    std::uint32_t pipBoyOverlayTimeoutMilliseconds{ 3000 };
     std::uint32_t mainMenuHelpMilliseconds{ 5000 };
     std::uint32_t mainMenuStopKey{ VK_BACK };
     std::uint32_t mainMenuNextKey{ VK_TAB };
@@ -38,8 +23,6 @@ namespace
     std::uint32_t mainMenuToggleOriginalAudioKey{ 'M' };
     float mainMenuVolume{ 1.0F };
     float mainMenuVolumeStep{ 0.1F };
-    float televisionVolume{ 1.0F };
-    float movieVolume{ 1.0F };
 
     bool ReadBoolean(
         const std::filesystem::path& path,
@@ -91,9 +74,14 @@ namespace
             path.c_str());
         wchar_t* end = nullptr;
         const float value = std::wcstof(buffer.data(), &end);
-        return end == buffer.data() ?
-            defaultValue :
-            std::clamp(value, minimum, maximum);
+        while (end && std::iswspace(*end)) {
+            ++end;
+        }
+        if (end == buffer.data() || (end && *end != L'\0') ||
+            !std::isfinite(value)) {
+            return defaultValue;
+        }
+        return std::clamp(value, minimum, maximum);
     }
 
     std::filesystem::path ReadPath(
@@ -145,14 +133,6 @@ void Config::Load(const HMODULE module)
         path,
         L"RecursiveMediaScan",
         true);
-    enableWorldScreens = ReadBoolean(
-        path,
-        L"EnableWorldScreens",
-        false);
-    enablePipBoyPlayer = ReadBoolean(
-        path,
-        L"EnablePipBoyPlayer",
-        false);
     mainMenuDirectory = ReadPath(
         path,
         L"MainMenuDirectory",
@@ -161,28 +141,6 @@ void Config::Load(const HMODULE module)
         path,
         L"MainMenuAudioDirectory",
         L"Data\\MainMenuAudio");
-    televisionDirectory = ReadPath(
-        path,
-        L"TelevisionDirectory",
-        L"Data\\TVVideos");
-    movieDirectory = ReadPath(
-        path,
-        L"MovieDirectory",
-        L"Data\\MovieVideos");
-    televisionWidth = ReadUnsigned(
-        path, L"Video", L"TelevisionWidth", 1024, 320, 3840);
-    televisionHeight = ReadUnsigned(
-        path, L"Video", L"TelevisionHeight", 576, 180, 2160);
-    projectorWidth = ReadUnsigned(
-        path, L"Video", L"ProjectorWidth", 1920, 320, 3840);
-    projectorHeight = ReadUnsigned(
-        path, L"Video", L"ProjectorHeight", 1080, 180, 2160);
-    pipBoyWidth = ReadUnsigned(
-        path, L"PipBoy", L"TargetWidth", 876, 320, 4096);
-    pipBoyHeight = ReadUnsigned(
-        path, L"PipBoy", L"TargetHeight", 700, 240, 4096);
-    pipBoyOverlayTimeoutMilliseconds = ReadUnsigned(
-        path, L"PipBoy", L"OverlayTimeoutMilliseconds", 3000, 500, 30000);
     mainMenuHelpMilliseconds = ReadUnsigned(
         path, L"MainMenuControls", L"HelpMilliseconds", 5000, 0, 30000);
     mainMenuStopKey = ReadUnsigned(
@@ -206,29 +164,18 @@ void Config::Load(const HMODULE module)
         path, L"Audio", L"MainMenuVolume", 1.0F, 0.0F, 2.0F);
     mainMenuVolumeStep = ReadFloat(
         path, L"MainMenuControls", L"VolumeStep", 0.1F, 0.01F, 1.0F);
-    televisionVolume = ReadFloat(
-        path, L"Audio", L"TelevisionVolume", 1.0F, 0.0F, 2.0F);
-    movieVolume = ReadFloat(
-        path, L"Audio", L"MovieVolume", 1.0F, 0.0F, 2.0F);
-
     spdlog::info(
         "Configuration: EnableNativeMainMenuBink={}, "
         "MuteVanillaMenuMusic={}, KeepPlayingWhenBorderless={}, "
-        "EnableWorldScreens={}, "
-        "EnablePipBoyPlayer={}, RecursiveMediaScan={}",
+        "RecursiveMediaScan={}",
         enableNativeMainMenuBink,
         muteVanillaMenuMusic,
         keepPlayingWhenBorderless,
-        enableWorldScreens,
-        enablePipBoyPlayer,
         recursiveMediaScan);
     spdlog::info(
-        "Media directories: main menu='{}', main-menu audio='{}', "
-        "TV='{}', movies='{}'",
+        "Media directories: main menu='{}', main-menu audio='{}'",
         mainMenuDirectory.string(),
-        mainMenuAudioDirectory.string(),
-        televisionDirectory.string(),
-        movieDirectory.string());
+        mainMenuAudioDirectory.string());
     spdlog::info(
         "Main-menu controls: stop={}, next={}, volume up={}, "
         "volume down={}, next audio={}, toggle original audio={}, "
@@ -263,16 +210,6 @@ bool Config::RecursiveMediaScan() noexcept
     return recursiveMediaScan;
 }
 
-bool Config::EnableWorldScreens() noexcept
-{
-    return enableWorldScreens;
-}
-
-bool Config::EnablePipBoyPlayer() noexcept
-{
-    return enablePipBoyPlayer;
-}
-
 std::filesystem::path Config::MainMenuDirectory()
 {
     return mainMenuDirectory;
@@ -281,51 +218,6 @@ std::filesystem::path Config::MainMenuDirectory()
 std::filesystem::path Config::MainMenuAudioDirectory()
 {
     return mainMenuAudioDirectory;
-}
-
-std::filesystem::path Config::TelevisionDirectory()
-{
-    return televisionDirectory;
-}
-
-std::filesystem::path Config::MovieDirectory()
-{
-    return movieDirectory;
-}
-
-std::uint32_t Config::TelevisionWidth() noexcept
-{
-    return televisionWidth;
-}
-
-std::uint32_t Config::TelevisionHeight() noexcept
-{
-    return televisionHeight;
-}
-
-std::uint32_t Config::ProjectorWidth() noexcept
-{
-    return projectorWidth;
-}
-
-std::uint32_t Config::ProjectorHeight() noexcept
-{
-    return projectorHeight;
-}
-
-std::uint32_t Config::PipBoyWidth() noexcept
-{
-    return pipBoyWidth;
-}
-
-std::uint32_t Config::PipBoyHeight() noexcept
-{
-    return pipBoyHeight;
-}
-
-std::uint32_t Config::PipBoyOverlayTimeoutMilliseconds() noexcept
-{
-    return pipBoyOverlayTimeoutMilliseconds;
 }
 
 std::uint32_t Config::MainMenuHelpMilliseconds() noexcept
@@ -371,14 +263,4 @@ float Config::MainMenuVolume() noexcept
 float Config::MainMenuVolumeStep() noexcept
 {
     return mainMenuVolumeStep;
-}
-
-float Config::TelevisionVolume() noexcept
-{
-    return televisionVolume;
-}
-
-float Config::MovieVolume() noexcept
-{
-    return movieVolume;
 }

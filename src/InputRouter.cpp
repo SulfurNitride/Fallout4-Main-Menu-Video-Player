@@ -2,7 +2,6 @@
 
 #include "BinkHook.h"
 #include "InputRouter.h"
-#include "PipBoyPlayer.h"
 
 namespace InputRouter
 {
@@ -11,10 +10,19 @@ namespace InputRouter
         std::mutex hookMutex;
         HWND falloutWindow{ nullptr };
         WNDPROC originalWindowProcedure{ nullptr };
-        bool rawInputCaptured{ false };
 
-        BOOL CALLBACK FindProcessWindow(
-            const HWND window,
+        bool IsCurrentProcessWindow(const HWND window)
+        {
+            if (!window || !IsWindow(window)) {
+                return false;
+            }
+
+            DWORD processId = 0;
+            return GetWindowThreadProcessId(window, &processId) != 0 &&
+                   processId == GetCurrentProcessId();
+        }
+
+        BOOL CALLBACK FindProcessWindow(const HWND window,
             const LPARAM parameter)
         {
             DWORD processId = 0;
@@ -32,11 +40,12 @@ namespace InputRouter
             if (best) {
                 GetWindowRect(best, &bestRect);
             }
-            const auto candidateArea = static_cast<std::int64_t>(
-                candidateRect.right - candidateRect.left) *
+            const auto candidateArea =
+                static_cast<std::int64_t>(
+                    candidateRect.right - candidateRect.left) *
                 (candidateRect.bottom - candidateRect.top);
-            const auto bestArea = static_cast<std::int64_t>(
-                bestRect.right - bestRect.left) *
+            const auto bestArea =
+                static_cast<std::int64_t>(bestRect.right - bestRect.left) *
                 (bestRect.bottom - bestRect.top);
             if (candidateArea > bestArea) {
                 best = window;
@@ -44,62 +53,53 @@ namespace InputRouter
             return TRUE;
         }
 
-        LRESULT CALLBACK RoutedWindowProcedure(
-            const HWND window,
+        LRESULT CALLBACK RoutedWindowProcedure(const HWND window,
             const UINT message,
             const WPARAM wParam,
             const LPARAM lParam)
         {
-            if (PipBoyPlayer::HandleWindowMessage(
-                    message,
-                    wParam,
-                    lParam)) {
-                if (message == WM_INPUT) {
-                    DefWindowProcW(window, message, wParam, lParam);
-                }
-                return 0;
-            }
-            if (BinkHook::HandleWindowMessage(
-                    message,
-                    wParam,
-                    lParam)) {
+            if (BinkHook::HandleWindowMessage(message, wParam, lParam)) {
                 return 0;
             }
 
-            return originalWindowProcedure ?
-                CallWindowProcW(
-                    originalWindowProcedure,
-                    window,
-                    message,
-                    wParam,
-                    lParam) :
-                DefWindowProcW(window, message, wParam, lParam);
+            return originalWindowProcedure
+                       ? CallWindowProcW(originalWindowProcedure,
+                             window,
+                             message,
+                             wParam,
+                             lParam)
+                       : DefWindowProcW(window, message, wParam, lParam);
         }
-    }
+    } // namespace
 
     bool Install()
     {
         std::scoped_lock lock(hookMutex);
-        if (originalWindowProcedure && IsWindow(falloutWindow)) {
+        if (originalWindowProcedure && IsCurrentProcessWindow(falloutWindow)) {
             return true;
+        }
+        if (originalWindowProcedure) {
+            // Do not reuse a stale HWND if Windows has recycled it for a
+            // window owned by another process.
+            falloutWindow = nullptr;
+            originalWindowProcedure = nullptr;
         }
 
         falloutWindow = FindWindowW(L"Fallout4", nullptr);
-        if (!falloutWindow) {
+        if (!IsCurrentProcessWindow(falloutWindow)) {
+            falloutWindow = nullptr;
             EnumWindows(
-                FindProcessWindow,
-                reinterpret_cast<LPARAM>(&falloutWindow));
+                FindProcessWindow, reinterpret_cast<LPARAM>(&falloutWindow));
         }
-        if (!falloutWindow) {
-            spdlog::warn(
-                "Could not find the Fallout 4 window for MMVP input");
+        if (!IsCurrentProcessWindow(falloutWindow)) {
+            spdlog::warn("Could not find the Fallout 4 window for MMVP input");
+            falloutWindow = nullptr;
             return false;
         }
 
         SetLastError(ERROR_SUCCESS);
-        originalWindowProcedure = reinterpret_cast<WNDPROC>(
-            SetWindowLongPtrW(
-                falloutWindow,
+        originalWindowProcedure =
+            reinterpret_cast<WNDPROC>(SetWindowLongPtrW(falloutWindow,
                 GWLP_WNDPROC,
                 reinterpret_cast<LONG_PTR>(&RoutedWindowProcedure)));
         if (!originalWindowProcedure && GetLastError() != ERROR_SUCCESS) {
@@ -110,60 +110,7 @@ namespace InputRouter
             return false;
         }
 
-        spdlog::info("Installed shared main-menu/Pip-Boy input router");
-        rawInputCaptured = false;
+        spdlog::info("Installed main-menu input router");
         return true;
     }
-
-    bool SetRawInputCapture(const bool enabled)
-    {
-        if (enabled && !Install()) {
-            return false;
-        }
-
-        std::scoped_lock lock(hookMutex);
-        if (!IsWindow(falloutWindow)) {
-            rawInputCaptured = false;
-            return !enabled;
-        }
-        if (rawInputCaptured == enabled) {
-            return true;
-        }
-
-        RAWINPUTDEVICE devices[2]{};
-        devices[0].usUsagePage = 0x01;
-        devices[0].usUsage = 0x06;
-        devices[0].dwFlags = enabled ? RIDEV_INPUTSINK : 0;
-        devices[0].hwndTarget = falloutWindow;
-        devices[1].usUsagePage = 0x01;
-        devices[1].usUsage = 0x02;
-        devices[1].dwFlags = enabled ? RIDEV_INPUTSINK : 0;
-        devices[1].hwndTarget = falloutWindow;
-
-        if (!RegisterRawInputDevices(
-                devices,
-                static_cast<UINT>(std::size(devices)),
-                sizeof(RAWINPUTDEVICE))) {
-            spdlog::error(
-                "Could not {} MMVP raw keyboard/mouse capture: {}",
-                enabled ? "register" : "restore",
-                GetLastError());
-            return false;
-        }
-
-        rawInputCaptured = enabled;
-        if (enabled) {
-            spdlog::info(
-                "Registered Holo-Wind-style raw keyboard/mouse input sink");
-        } else {
-            spdlog::info(
-                "Restored Fallout raw keyboard/mouse input registration");
-        }
-        return true;
-    }
-
-    HWND Window() noexcept
-    {
-        return falloutWindow;
-    }
-}
+} // namespace InputRouter

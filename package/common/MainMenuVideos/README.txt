@@ -1,8 +1,6 @@
 Put main-menu videos in this folder.
 
-The recommended FOMOD installation provides main-menu playback without an
-ESP or holotape. The holotape/Pip-Boy/world-screen feature is a separate,
-explicitly experimental installer option.
+The FOMOD provides main-menu playback without an ESP, ESL, or holotape.
 
 The player currently accepts:
 3g2, 3gp, asf, avi, f4v, flv, m4v, mkv, mov, mp4, mpeg, mpg,

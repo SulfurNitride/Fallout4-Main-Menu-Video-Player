@@ -2,7 +2,7 @@
   "name": "ffmpeg",
   "version": "4.4.3",
   "port-version": 1,
-  "description": "FFmpeg multimedia libraries (Linux-host cross-build overlay).",
+  "description": "FFmpeg multimedia libraries with host-aware MSYS2 path handling.",
   "homepage": "https://ffmpeg.org",
   "dependencies": [
     {

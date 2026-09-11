@@ -1,8 +1,8 @@
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,2,0
- PRODUCTVERSION 0,1,2,0
+ FILEVERSION MMVP_VERSION_MAJOR,MMVP_VERSION_MINOR,MMVP_VERSION_PATCH,0
+ PRODUCTVERSION MMVP_VERSION_MAJOR,MMVP_VERSION_MINOR,MMVP_VERSION_PATCH,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS VS_FF_DEBUG
@@ -19,11 +19,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Main Menu Video Player contributors"
             VALUE "FileDescription", "Fallout 4 Main Menu Video Player"
-            VALUE "FileVersion", "0.1.2.0"
+            VALUE "FileVersion", MMVP_VERSION ".0"
             VALUE "InternalName", "MainMenuVideoPlayer"
             VALUE "OriginalFilename", "MainMenuVideoPlayer.dll"
             VALUE "ProductName", "Main Menu Video Player"
-            VALUE "ProductVersion", "0.1.2.0"
+            VALUE "ProductVersion", MMVP_VERSION ".0"
         END
     END
     BLOCK "VarFileInfo"

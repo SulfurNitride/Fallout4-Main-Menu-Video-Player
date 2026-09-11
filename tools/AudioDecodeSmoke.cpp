@@ -42,7 +42,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     const AVCodecParameters* parameters = format->streams[stream]->codecpar;
-    AVCodec* codec = avcodec_find_decoder(parameters->codec_id);
+    const AVCodec* codec = avcodec_find_decoder(parameters->codec_id);
     AVCodecContext* decoder = codec ?
         avcodec_alloc_context3(codec) :
         nullptr;

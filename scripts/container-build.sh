@@ -12,8 +12,10 @@ cmake \
     -DVCPKG_OVERLAY_PORTS=/work/cmake/ports \
     -DVCPKG_OVERLAY_TRIPLETS=/work/cmake/triplets \
     -DVCPKG_TARGET_TRIPLET=x64-windows-clang-linux \
-    -DVCPKG_HOST_TRIPLET=x64-linux \
-    -DMMVP_F4SE_OG_SDK=/f4se-og-sdk
+    -DVCPKG_HOST_TRIPLET=x64-linux
+
+cmake --build /work/build/windows \
+    --target mmvp_decode_smoke mmvp_audio_smoke --parallel
 
 cmake --build /work/build/windows --target package_mod --parallel
 

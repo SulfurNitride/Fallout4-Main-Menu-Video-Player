@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     MainMenuVideoPlayer
-    VERSION 0.1.2
+    VERSION 0.2.0
     LANGUAGES CXX RC
 )
 
@@ -22,7 +22,6 @@ endif()
 
 find_package(minhook CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
 find_path(FFMPEG_INCLUDE_DIR "libavcodec/avcodec.h" REQUIRED)
 find_library(AVFORMAT_LIBRARY NAMES avformat REQUIRED)
 find_library(AVCODEC_LIBRARY NAMES avcodec REQUIRED)
@@ -34,6 +33,8 @@ find_library(AOM_LIBRARY NAMES aom REQUIRED)
 set(MMVP_CORE_SOURCES
     src/AudioOutput.cpp
     src/AudioOutput.h
+    src/BinkFrameCompositor.cpp
+    src/BinkFrameCompositor.h
     src/BinkHook.cpp
     src/BinkHook.h
     src/Config.cpp
@@ -41,23 +42,23 @@ set(MMVP_CORE_SOURCES
     src/EngineSettings.cpp
     src/EngineSettings.h
     src/F4SEMinimal.h
+    src/FfmpegSupport.cpp
+    src/FfmpegSupport.h
     src/InputRouter.cpp
     src/InputRouter.h
     src/Log.cpp
     src/Log.h
+    src/MainMenuMedia.cpp
+    src/MainMenuMedia.h
     src/MediaLibrary.cpp
     src/MediaLibrary.h
-    src/PlaybackTypes.h
-    src/PipBoyPlayer.cpp
-    src/PipBoyPlayer.h
-    src/Serialization.cpp
-    src/Serialization.h
+    src/PlaybackGate.cpp
+    src/PlaybackGate.h
+    src/VideoFrame.h
     src/VideoPlayer.cpp
     src/VideoPlayer.h
-    src/WorldPlayback.cpp
-    src/WorldPlayback.h
-    src/WorldTextureBridge.cpp
-    src/WorldTextureBridge.h
+    src/VideoScaling.cpp
+    src/VideoScaling.h
 )
 
 # Only the Linux-hosted clang-cl cross-build needs this fallback. Native MSVC
@@ -98,8 +99,6 @@ target_link_libraries(mmvp_core
         user32
         ws2_32
         xaudio2
-        d3d11
-        dxgi
 )
 
 if(MSVC)
@@ -156,13 +155,19 @@ add_mmvp_variant(MainMenuVideoPlayerAE MMVP_RUNTIME_AE AE)
 add_executable(mmvp_decode_smoke EXCLUDE_FROM_ALL
     tools/DecodeSmoke.cpp
     tools/SmokePath.h
+    src/VideoScaling.cpp
+    src/VideoScaling.h
 )
-target_include_directories(mmvp_decode_smoke PRIVATE "${FFMPEG_INCLUDE_DIR}")
+target_include_directories(mmvp_decode_smoke PRIVATE
+    "${FFMPEG_INCLUDE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
 target_link_libraries(mmvp_decode_smoke PRIVATE
     ${AVFORMAT_LIBRARY}
     ${AVCODEC_LIBRARY}
     ${AVUTIL_LIBRARY}
     ${SWRESAMPLE_LIBRARY}
+    ${SWSCALE_LIBRARY}
     ${AOM_LIBRARY}
     bcrypt
     mfplat
@@ -198,46 +203,9 @@ target_link_libraries(mmvp_audio_smoke PRIVATE
 set(PACKAGE_ROOT "${CMAKE_BINARY_DIR}/package")
 set(PACKAGE_INSTALLER "${PACKAGE_ROOT}/installer")
 set(PACKAGE_COMMON "${CMAKE_SOURCE_DIR}/package/common")
-set(PACKAGE_EXPERIMENTAL "${CMAKE_SOURCE_DIR}/package/experimental")
 set(PACKAGE_ARCHIVE
     "${CMAKE_BINARY_DIR}/${PROJECT_NAME}-${PROJECT_VERSION}-FOMOD.zip")
-set(GENERATED_ASSET_ROOT "${CMAKE_BINARY_DIR}/generated-assets")
-set(TELEVISION_SCREEN_DDS
-    "${GENERATED_ASSET_ROOT}/Textures/MMVP/World/TelevisionScreenOutput1_d.dds")
-set(PROJECTOR_SCREEN_DDS
-    "${GENERATED_ASSET_ROOT}/Textures/MMVP/World/MovieProjectorScreenOutput00001_d.dds")
 file(MAKE_DIRECTORY "${PACKAGE_ROOT}")
-
-add_custom_command(
-    OUTPUT "${TELEVISION_SCREEN_DDS}"
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_SOURCE_DIR}/tools/generate_screen_dds.py"
-            --kind television
-            --width 1024
-            --height 576
-            --output "${TELEVISION_SCREEN_DDS}"
-    DEPENDS "${CMAKE_SOURCE_DIR}/tools/generate_screen_dds.py"
-    VERBATIM
-)
-
-add_custom_command(
-    OUTPUT "${PROJECTOR_SCREEN_DDS}"
-    COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_SOURCE_DIR}/tools/generate_screen_dds.py"
-            --kind projector
-            --width 1920
-            --height 1080
-            --output "${PROJECTOR_SCREEN_DDS}"
-    DEPENDS "${CMAKE_SOURCE_DIR}/tools/generate_screen_dds.py"
-    VERBATIM
-)
-
-add_custom_target(
-    mmvp_screen_assets
-    DEPENDS
-        "${TELEVISION_SCREEN_DDS}"
-        "${PROJECTOR_SCREEN_DDS}"
-)
 
 configure_file(
     "${CMAKE_SOURCE_DIR}/package/fomod/info.xml.in"
@@ -252,22 +220,12 @@ add_custom_target(package_mod
             "${PACKAGE_INSTALLER}/common"
             "${PACKAGE_INSTALLER}/fomod"
             "${PACKAGE_INSTALLER}/legal/licenses"
-            "${PACKAGE_INSTALLER}/experimental/Textures/MMVP/World"
             "${PACKAGE_INSTALLER}/runtime/OG/F4SE/Plugins"
             "${PACKAGE_INSTALLER}/runtime/NG/F4SE/Plugins"
             "${PACKAGE_INSTALLER}/runtime/AE/F4SE/Plugins"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
             "${PACKAGE_COMMON}"
             "${PACKAGE_INSTALLER}/common"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory
-            "${PACKAGE_EXPERIMENTAL}"
-            "${PACKAGE_INSTALLER}/experimental"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${TELEVISION_SCREEN_DDS}"
-            "${PACKAGE_INSTALLER}/experimental/Textures/MMVP/World/TelevisionScreenOutput1_d.dds"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${PROJECTOR_SCREEN_DDS}"
-            "${PACKAGE_INSTALLER}/experimental/Textures/MMVP/World/MovieProjectorScreenOutput00001_d.dds"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_SOURCE_DIR}/README.md"
             "${PACKAGE_INSTALLER}/common/README.md"
@@ -297,14 +255,13 @@ add_custom_target(package_mod
             "${PACKAGE_INSTALLER}/runtime/AE/F4SE/Plugins/MainMenuVideoPlayer.dll"
     COMMAND "${CMAKE_COMMAND}" -E chdir "${PACKAGE_INSTALLER}"
             "${CMAKE_COMMAND}" -E tar cf "${PACKAGE_ARCHIVE}" --format=zip --
-            fomod common experimental legal runtime
+            fomod common legal runtime
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     BYPRODUCTS "${PACKAGE_ARCHIVE}"
     DEPENDS
         MainMenuVideoPlayerOG
         MainMenuVideoPlayerNG
         MainMenuVideoPlayerAE
-        mmvp_screen_assets
     COMMENT "Packaging the OG, NG, and AE DLLs in one FOMOD"
     VERBATIM
 )

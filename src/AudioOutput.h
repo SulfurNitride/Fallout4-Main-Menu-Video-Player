@@ -15,7 +15,6 @@ public:
     void Pause();
     void Resume();
     void SetVolume(float volume);
-    void SetPan(float pan);
     void Reset();
 
 private:

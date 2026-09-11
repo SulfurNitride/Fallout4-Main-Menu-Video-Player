@@ -5,10 +5,6 @@
 #include "EngineSettings.h"
 #include "F4SEMinimal.h"
 #include "Log.h"
-#include "PipBoyPlayer.h"
-#include "Serialization.h"
-#include "WorldPlayback.h"
-#include "WorldTextureBridge.h"
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
@@ -33,7 +29,8 @@ namespace
                runtime == F4SEMinimal::kRuntimeAe159 ||
                runtime == F4SEMinimal::kRuntimeAe169 ||
                runtime == F4SEMinimal::kRuntimeAe191 ||
-               runtime == F4SEMinimal::kRuntimeAe221;
+               runtime == F4SEMinimal::kRuntimeAe221 ||
+               runtime == F4SEMinimal::kRuntimeAe240;
 #else
 #error "A Main Menu Video Player runtime variant must be selected"
 #endif
@@ -57,6 +54,7 @@ namespace
         data.AddCompatibleVersion(F4SEMinimal::kRuntimeAe169);
         data.AddCompatibleVersion(F4SEMinimal::kRuntimeAe191);
         data.AddCompatibleVersion(F4SEMinimal::kRuntimeAe221);
+        data.AddCompatibleVersion(F4SEMinimal::kRuntimeAe240);
 #endif
         return data;
     }
@@ -102,16 +100,5 @@ extern "C" __declspec(dllexport) bool F4SEPlugin_Load(
         return false;
     }
     spdlog::info("Native Bink substitution hooks installed successfully");
-    if (!WorldPlayback::GetSingleton().Initialize()) {
-        spdlog::critical("Failed to initialize world playback sessions");
-        return false;
-    }
-    if (!PipBoyPlayer::InitializeScaleform(f4se)) {
-        return false;
-    }
-    Serialization::Initialize(f4se);
-    spdlog::info(
-        "World texture hook discovery deferred until the renderer opens "
-        "the main-menu Bink");
     return true;
 }

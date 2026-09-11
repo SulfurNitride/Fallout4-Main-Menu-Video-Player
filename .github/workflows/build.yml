@@ -90,18 +90,6 @@ jobs:
           restore-keys: |
             vcpkg-${{ runner.os }}-
 
-      - name: Check out official F4SE 0.6.23 SDK
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force `
-            -Path "$env:GITHUB_WORKSPACE\f4se-sdk" | Out-Null
-          git clone --depth 1 --branch v0.6.23 `
-            https://github.com/ianpatt/f4se.git `
-            "$env:GITHUB_WORKSPACE\f4se-sdk\f4se"
-          git clone --depth 1 `
-            https://github.com/ianpatt/common.git `
-            "$env:GITHUB_WORKSPACE\f4se-sdk\common"
-
       - name: Configure
         shell: pwsh
         env:
@@ -115,8 +103,17 @@ jobs:
             -DVCPKG_APPLOCAL_DEPS=OFF `
             -DVCPKG_OVERLAY_PORTS="$env:GITHUB_WORKSPACE\cmake\ports" `
             -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE\cmake\triplets" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md `
-            -DMMVP_F4SE_OG_SDK="$env:GITHUB_WORKSPACE\f4se-sdk"
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+
+      - name: Build decoder smoke executables
+        shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ runner.temp }}\vcpkg-binary-cache,readwrite
+        run: |
+          cmake --build build\windows-ci `
+            --config Release `
+            --target mmvp_decode_smoke mmvp_audio_smoke `
+            --parallel
 
       - name: Build FOMOD
         shell: pwsh
@@ -141,19 +138,6 @@ jobs:
             "common\F4SE\Plugins\MainMenuVideoPlayer.ini",
             "common\MainMenuAudio\README.txt",
             "common\Video\MainMenuLoop.bk2",
-            "experimental\MMVP_WorldScreens.esp",
-            "experimental\TVVideos\README.txt",
-            "experimental\MovieVideos\README.txt",
-            "experimental\Programs\MMVPBrowser.swf",
-            "experimental\Programs\MMVPPlayer.swf",
-            "experimental\Scripts\MMVP\HolotapeQuest.pex",
-            "experimental\Meshes\MMVP\TelevisionWorkshopVariant01.nif",
-            "experimental\Meshes\MMVP\TelevisionWorkshopVariant02.nif",
-            "experimental\Meshes\MMVP\FilmProjector.nif",
-            "experimental\Meshes\MMVP\MovieScreen.nif",
-            "experimental\Materials\MMVP\World\MovieScreenProjectionSurface_BillboardSignDefault01ReplacementMMVP.BGSM",
-            "experimental\Textures\MMVP\World\TelevisionScreenOutput1_d.dds",
-            "experimental\Textures\MMVP\World\MovieProjectorScreenOutput00001_d.dds",
             "runtime\OG\F4SE\Plugins\MainMenuVideoPlayer.dll",
             "runtime\NG\F4SE\Plugins\MainMenuVideoPlayer.dll",
             "runtime\AE\F4SE\Plugins\MainMenuVideoPlayer.dll",
@@ -169,29 +153,96 @@ jobs:
             }
           }
 
-          $forbiddenCoreFiles = @(
-            "common\MMVP_WorldScreens.esp",
-            "common\Scripts\MMVP\HolotapeQuest.pex",
-            "common\Programs\MMVPBrowser.swf",
-            "common\Programs\MMVPPlayer.swf",
-            "common\TVVideos\README.txt",
-            "common\MovieVideos\README.txt",
+          $forbiddenFiles = @(
+            "experimental",
             "common\LICENSE",
             "common\THIRD_PARTY_NOTICES.txt",
             "common\licenses\FFmpeg-LGPL-2.1.txt"
           )
-          foreach ($relativePath in $forbiddenCoreFiles) {
+          foreach ($relativePath in $forbiddenFiles) {
             if (Test-Path (Join-Path $expanded $relativePath)) {
-              throw "Experimental file leaked into required core: $relativePath"
+              throw "Unexpected package path: $relativePath"
             }
           }
 
-          python scripts\validate-interface-swfs.py `
-            (Join-Path $expanded "experimental\Programs\MMVPBrowser.swf") `
-            (Join-Path $expanded "experimental\Programs\MMVPPlayer.swf")
+          $gamePlugins = Get-ChildItem -Path $expanded -Recurse -File |
+            Where-Object { $_.Extension -in ".esp", ".esl" }
+          if ($gamePlugins) {
+            throw "The main-menu-only package contains an ESP/ESL: $($gamePlugins.FullName -join ', ')"
+          }
 
           [xml](Get-Content (Join-Path $expanded "fomod\info.xml")) | Out-Null
           [xml](Get-Content (Join-Path $expanded "fomod\ModuleConfig.xml")) | Out-Null
+
+          $infoXml = [xml](Get-Content (Join-Path $expanded "fomod\info.xml"))
+          $expectedVersion = [string]$infoXml.fomod.Version
+          if ([string]::IsNullOrWhiteSpace($expectedVersion)) {
+            throw "FOMOD metadata does not contain a version"
+          }
+
+          $dumpbinCommand = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
+          $dumpbinPath = if ($dumpbinCommand) {
+            $dumpbinCommand.Source
+          } else {
+            $vswherePath = Join-Path ${env:ProgramFiles(x86)} `
+              "Microsoft Visual Studio\Installer\vswhere.exe"
+            if (-not (Test-Path $vswherePath -PathType Leaf)) {
+              $null
+            } else {
+              $vsInstallPath = & $vswherePath `
+                -latest -products * `
+                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                -property installationPath
+              if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($vsInstallPath)) {
+                $null
+              } else {
+                $dumpbin = Get-ChildItem -Path (Join-Path $vsInstallPath "VC\Tools\MSVC") `
+                  -Filter dumpbin.exe -Recurse -File |
+                  Sort-Object FullName -Descending |
+                  Select-Object -First 1
+                if ($dumpbin) { $dumpbin.FullName } else { $null }
+              }
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($dumpbinPath)) {
+            throw "Visual C++ dumpbin.exe was not found; cannot validate plugin exports"
+          }
+
+          $runtimeDlls = Get-ChildItem -Path (Join-Path $expanded "runtime") `
+            -Filter MainMenuVideoPlayer.dll -Recurse -File
+          if ($runtimeDlls.Count -ne 3) {
+            throw "Expected three runtime DLLs, found $($runtimeDlls.Count)"
+          }
+
+          foreach ($dll in $runtimeDlls) {
+            $versionInfo = $dll.VersionInfo
+            if ($versionInfo.FileVersion -ne "$expectedVersion.0" -or
+                $versionInfo.ProductVersion -ne "$expectedVersion.0") {
+              throw "Unexpected version metadata in $($dll.FullName): " +
+                "$($versionInfo.FileVersion) / $($versionInfo.ProductVersion)"
+            }
+            if ($versionInfo.OriginalFilename -ne "MainMenuVideoPlayer.dll") {
+              throw "Unexpected original filename metadata in $($dll.FullName)"
+            }
+            if ($versionInfo.ProductName -ne "Main Menu Video Player") {
+              throw "Unexpected product metadata in $($dll.FullName)"
+            }
+
+            $exportLines = & $dumpbinPath /nologo /exports $dll.FullName 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              throw "dumpbin failed for $($dll.FullName): $($exportLines -join ' ')"
+            }
+            $exports = $exportLines -join "`n"
+            foreach ($symbol in @(
+              "F4SEPlugin_Load",
+              "F4SEPlugin_Query",
+              "F4SEPlugin_Version"
+            )) {
+              if ($exports -notmatch "\b$([regex]::Escape($symbol))\b") {
+                throw "Missing $symbol export in $($dll.FullName)"
+              }
+            }
+          }
 
       - name: Upload FOMOD
         if: github.event_name != 'schedule'

@@ -17,12 +17,5 @@
 /scripts/*
 !/scripts/build.sh
 !/scripts/container-build.sh
-!/scripts/build-world-plugin.sh
-!/scripts/build-papyrus.sh
-!/scripts/prepare-world-assets.sh
-!/scripts/build-interface-swfs.sh
-!/scripts/validate-interface-swfs.py
-/tools/WorldPluginGenerator/bin/
-/tools/WorldPluginGenerator/obj/
 __pycache__/
 *.pyc

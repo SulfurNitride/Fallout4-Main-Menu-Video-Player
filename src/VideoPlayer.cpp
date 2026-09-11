@@ -2,12 +2,13 @@
 
 #include "AudioOutput.h"
 #include "Config.h"
-#include "EngineSettings.h"
-#include "MediaLibrary.h"
+#include "FfmpegSupport.h"
+#include "MainMenuMedia.h"
+#include "PlaybackGate.h"
 #include "VideoPlayer.h"
+#include "VideoScaling.h"
 
-extern "C"
-{
+extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
@@ -18,222 +19,12 @@ extern "C"
 
 namespace
 {
-    std::string Utf8Path(const std::filesystem::path& path)
-    {
-        const auto utf8 = path.u8string();
-        return {
-            reinterpret_cast<const char*>(utf8.data()),
-            utf8.size()
-        };
-    }
+    using FfmpegSupport::AvError;
+    using FfmpegSupport::FindDecoder;
+    using FfmpegSupport::FindVideoStream;
+    using FfmpegSupport::Utf8Path;
 
-    std::string AvError(const int code)
-    {
-        std::array<char, AV_ERROR_MAX_STRING_SIZE> message{};
-        av_strerror(code, message.data(), message.size());
-        return message.data();
-    }
-
-    int FindVideoStream(const AVFormatContext* format)
-    {
-        for (unsigned int index = 0; index < format->nb_streams; ++index) {
-            const AVStream* stream = format->streams[index];
-            if (stream && stream->codecpar &&
-                stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-                return static_cast<int>(index);
-            }
-        }
-        return -1;
-    }
-
-    int FindAudioStream(const AVFormatContext* format)
-    {
-        for (unsigned int index = 0; index < format->nb_streams; ++index) {
-            const AVStream* stream = format->streams[index];
-            if (stream && stream->codecpar &&
-                stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-                return static_cast<int>(index);
-            }
-        }
-        return -1;
-    }
-
-    AVCodec* FindDecoder(const AVCodecParameters* parameters)
-    {
-        // FFmpeg 4.4's native AV1 decoder fails on some 10-bit streams under
-        // Wine. Use the external libaom decoder for AV1 instead.
-        if (parameters->codec_id == AV_CODEC_ID_AV1) {
-            if (AVCodec* aom = avcodec_find_decoder_by_name("libaom-av1")) {
-                return aom;
-            }
-        }
-        return avcodec_find_decoder(parameters->codec_id);
-    }
-
-    HWND FindGameWindow()
-    {
-        struct Search
-        {
-            DWORD processId;
-            HWND window;
-        } search{ GetCurrentProcessId(), nullptr };
-
-        EnumWindows(
-            [](const HWND window, const LPARAM parameter) -> BOOL {
-                auto& candidate = *reinterpret_cast<Search*>(parameter);
-                DWORD processId = 0;
-                GetWindowThreadProcessId(window, &processId);
-                if (processId == candidate.processId &&
-                    IsWindowVisible(window) &&
-                    GetWindow(window, GW_OWNER) == nullptr) {
-                    RECT rect{};
-                    RECT previous{};
-                    GetWindowRect(window, &rect);
-                    GetWindowRect(candidate.window, &previous);
-                    const auto area = static_cast<std::int64_t>(
-                        rect.right - rect.left) *
-                        (rect.bottom - rect.top);
-                    const auto previousArea = static_cast<std::int64_t>(
-                        previous.right - previous.left) *
-                        (previous.bottom - previous.top);
-                    if (area > previousArea) {
-                        candidate.window = window;
-                    }
-                }
-                return TRUE;
-            },
-            reinterpret_cast<LPARAM>(&search));
-        return search.window;
-    }
-
-    HWND GameWindow()
-    {
-        static std::atomic<HWND> cachedWindow{ nullptr };
-        HWND window = cachedWindow.load(std::memory_order_acquire);
-        if (!window || !IsWindow(window)) {
-            window = FindGameWindow();
-            cachedWindow.store(window, std::memory_order_release);
-        }
-        return window;
-    }
-
-    bool IsBorderlessFullscreen(const HWND window)
-    {
-        if (!window || IsIconic(window)) {
-            return false;
-        }
-
-        RECT windowRect{};
-        MONITORINFO monitorInfo{};
-        monitorInfo.cbSize = sizeof(MONITORINFO);
-        const HMONITOR monitor = MonitorFromWindow(
-            window,
-            MONITOR_DEFAULTTONEAREST);
-        if (!GetWindowRect(window, &windowRect) ||
-            !GetMonitorInfoW(monitor, &monitorInfo)) {
-            return false;
-        }
-
-        constexpr LONG kEdgeTolerance{ 2 };
-        return windowRect.left <=
-                   monitorInfo.rcMonitor.left + kEdgeTolerance &&
-               windowRect.top <=
-                   monitorInfo.rcMonitor.top + kEdgeTolerance &&
-               windowRect.right >=
-                   monitorInfo.rcMonitor.right - kEdgeTolerance &&
-               windowRect.bottom >=
-                   monitorInfo.rcMonitor.bottom - kEdgeTolerance;
-    }
-
-    bool PlaybackMayAdvance()
-    {
-        enum class State
-        {
-            kForeground,
-            kBorderlessBackground,
-            kPaused
-        };
-        static std::atomic<State> previousState{ State::kForeground };
-
-        const HWND foreground = GetForegroundWindow();
-        if (foreground) {
-            DWORD processId = 0;
-            GetWindowThreadProcessId(foreground, &processId);
-            if (processId == GetCurrentProcessId()) {
-                const State previous = previousState.exchange(
-                    State::kForeground,
-                    std::memory_order_relaxed);
-                if (previous != State::kForeground) {
-                    spdlog::info("Fallout regained focus; playback active");
-                }
-                return true;
-            }
-        }
-
-        const bool keepPlaying =
-            Config::KeepPlayingWhenBorderless() &&
-            (EngineSettings::IsBorderlessMode() ||
-             IsBorderlessFullscreen(GameWindow()));
-        const State state = keepPlaying ?
-            State::kBorderlessBackground :
-            State::kPaused;
-        const State previous = previousState.exchange(
-            state,
-            std::memory_order_relaxed);
-        if (previous != state) {
-            if (keepPlaying) {
-                spdlog::info(
-                    "Fallout lost focus in borderless mode; "
-                    "playback remains active");
-            } else {
-                spdlog::info(
-                    "Fallout lost focus outside borderless mode; "
-                    "playback paused");
-            }
-        }
-        return keepPlaying;
-    }
-
-    bool ApplyCenterCrop(
-        AVFrame* frame,
-        const std::uint32_t outputWidth,
-        const std::uint32_t outputHeight)
-    {
-        if (!frame ||
-            frame->width <= 0 ||
-            frame->height <= 0 ||
-            outputWidth == 0 ||
-            outputHeight == 0) {
-            return false;
-        }
-
-        const std::uint64_t inputAspect =
-            static_cast<std::uint64_t>(frame->width) * outputHeight;
-        const std::uint64_t outputAspect =
-            static_cast<std::uint64_t>(outputWidth) * frame->height;
-        if (inputAspect > outputAspect) {
-            const std::size_t croppedWidth =
-                static_cast<std::size_t>(
-                    static_cast<std::uint64_t>(frame->height) *
-                    outputWidth / outputHeight);
-            const std::size_t removed =
-                static_cast<std::size_t>(frame->width) - croppedWidth;
-            frame->crop_left = removed / 2;
-            frame->crop_right = removed - frame->crop_left;
-        } else if (inputAspect < outputAspect) {
-            const std::size_t croppedHeight =
-                static_cast<std::size_t>(
-                    static_cast<std::uint64_t>(frame->width) *
-                    outputHeight / outputWidth);
-            const std::size_t removed =
-                static_cast<std::size_t>(frame->height) - croppedHeight;
-            frame->crop_top = removed / 2;
-            frame->crop_bottom = removed - frame->crop_top;
-        }
-
-        return av_frame_apply_cropping(frame, 0) >= 0;
-    }
-}
+} // namespace
 
 VideoPlayer& VideoPlayer::GetSingleton()
 {
@@ -241,15 +32,11 @@ VideoPlayer& VideoPlayer::GetSingleton()
     return instance;
 }
 
-VideoPlayer::VideoPlayer() :
-    random_(std::random_device{}()),
-    audioRandom_(std::random_device{}()),
-    worker_([this](std::stop_token stopToken) {
-        Worker(stopToken);
-    }),
-    overrideAudioWorker_([this](std::stop_token stopToken) {
-        OverrideAudioWorker(stopToken);
-    })
+VideoPlayer::VideoPlayer()
+    : audioRandom_(std::random_device{}()),
+      worker_([this](std::stop_token stopToken) { Worker(stopToken); }),
+      overrideAudioWorker_(
+          [this](std::stop_token stopToken) { OverrideAudioWorker(stopToken); })
 {
     volume_.store(Config::MainMenuVolume(), std::memory_order_release);
     // A populated MainMenuAudio folder opts into the dedicated soundtrack.
@@ -266,10 +53,9 @@ VideoPlayer::~VideoPlayer()
     overrideAudioCondition_.notify_all();
 }
 
-void VideoPlayer::OnNativeVideoOpened(
-    const std::uint32_t width,
+void VideoPlayer::OnNativeVideoOpened(const std::uint32_t width,
     const std::uint32_t height,
-    std::optional<std::filesystem::path> selectedVideo)
+    std::filesystem::path selectedVideo)
 {
     {
         std::scoped_lock lock(wakeMutex_);
@@ -295,8 +81,7 @@ void VideoPlayer::OnNativeVideoClosed()
     wakeCondition_.notify_all();
 }
 
-void VideoPlayer::StartOverrideAudio(
-    const std::filesystem::path& path)
+void VideoPlayer::StartOverrideAudio(const std::filesystem::path& path)
 {
     {
         std::scoped_lock lock(overrideAudioMutex_);
@@ -318,14 +103,11 @@ void VideoPlayer::StopOverrideAudio()
     overrideAudioCondition_.notify_all();
 }
 
-std::optional<std::filesystem::path>
-VideoPlayer::PickDedicatedAudio()
+std::optional<std::filesystem::path> VideoPlayer::PickDedicatedAudio()
 {
     const auto directory = Config::MainMenuAudioDirectory();
-    const MediaLibrary library(
-        directory,
-        Config::RecursiveMediaScan());
-    auto sources = library.ScanAudioSources();
+    auto sources = MainMenuMedia::ScanAudioSources(
+        directory, Config::RecursiveMediaScan());
     if (sources.empty()) {
         spdlog::warn(
             "No supported dedicated main-menu audio sources were found "
@@ -334,28 +116,41 @@ VideoPlayer::PickDedicatedAudio()
         return std::nullopt;
     }
 
-    std::scoped_lock lock(audioSelectionMutex_);
-    std::ranges::shuffle(sources, audioRandom_);
-    if (sources.size() > 1 && sources.front() == previousAudio_) {
-        std::swap(sources.front(), sources[1]);
+    {
+        std::scoped_lock lock(audioSelectionMutex_);
+        std::ranges::shuffle(sources, audioRandom_);
+        if (sources.size() > 1 && sources.front() == previousAudio_) {
+            std::swap(sources.front(), sources[1]);
+        }
     }
-    previousAudio_ = sources.front();
-    spdlog::info(
-        "Selected dedicated main-menu audio: {}",
-        Utf8Path(previousAudio_));
-    return previousAudio_;
+    for (const auto& source : sources) {
+        if (!HasDecodableAudioTrack(source)) {
+            spdlog::warn("Ignoring dedicated audio source with no usable audio "
+                         "track: {}",
+                Utf8Path(source));
+            continue;
+        }
+        {
+            std::scoped_lock lock(audioSelectionMutex_);
+            previousAudio_ = source;
+        }
+        spdlog::info(
+            "Selected dedicated main-menu audio: {}", Utf8Path(source));
+        return source;
+    }
+    spdlog::warn(
+        "No decodable dedicated main-menu audio sources were found in {}",
+        Utf8Path(directory));
+    return std::nullopt;
 }
 
-std::optional<std::filesystem::path>
-VideoPlayer::PickDedicatedAudioForVideo(
+std::optional<std::filesystem::path> VideoPlayer::PickDedicatedAudioForVideo(
     const std::filesystem::path& video,
     const bool allowRandomFallback)
 {
     const auto directory = Config::MainMenuAudioDirectory();
-    const MediaLibrary library(
-        directory,
-        Config::RecursiveMediaScan());
-    auto sources = library.ScanAudioSources();
+    auto sources = MainMenuMedia::ScanAudioSources(
+        directory, Config::RecursiveMediaScan());
     if (sources.empty()) {
         if (allowRandomFallback) {
             spdlog::warn(
@@ -367,22 +162,27 @@ VideoPlayer::PickDedicatedAudioForVideo(
     }
 
     const std::wstring videoStem = video.stem().wstring();
-    const auto matching = std::ranges::find_if(
-        sources,
-        [&](const std::filesystem::path& source) {
+    for (const auto& source : sources) {
+        const bool matching = [&] {
             const std::wstring sourceStem = source.stem().wstring();
-            return std::ranges::equal(
-                videoStem,
+            return std::ranges::equal(videoStem,
                 sourceStem,
                 [](const wchar_t left, const wchar_t right) {
                     return std::towlower(left) == std::towlower(right);
                 });
-        });
-    if (matching != sources.end()) {
+        }();
+        if (!matching) {
+            continue;
+        }
+        if (!HasDecodableAudioTrack(source)) {
+            spdlog::warn("Ignoring same-name audio source with no usable audio "
+                         "track: {}",
+                Utf8Path(source));
+            continue;
+        }
         std::scoped_lock lock(audioSelectionMutex_);
-        previousAudio_ = *matching;
-        spdlog::info(
-            "Selected same-name main-menu audio for {}: {}",
+        previousAudio_ = source;
+        spdlog::info("Selected same-name main-menu audio for {}: {}",
             Utf8Path(video.filename()),
             Utf8Path(previousAudio_));
         return previousAudio_;
@@ -392,43 +192,113 @@ VideoPlayer::PickDedicatedAudioForVideo(
         return std::nullopt;
     }
 
-    std::scoped_lock lock(audioSelectionMutex_);
-    std::ranges::shuffle(sources, audioRandom_);
-    if (sources.size() > 1 && sources.front() == previousAudio_) {
-        std::swap(sources.front(), sources[1]);
+    {
+        std::scoped_lock lock(audioSelectionMutex_);
+        std::ranges::shuffle(sources, audioRandom_);
+        if (sources.size() > 1 && sources.front() == previousAudio_) {
+            std::swap(sources.front(), sources[1]);
+        }
     }
-    previousAudio_ = sources.front();
-    spdlog::info(
-        "Selected random main-menu audio for silent video {}: {}",
-        Utf8Path(video.filename()),
-        Utf8Path(previousAudio_));
-    return previousAudio_;
+    for (const auto& source : sources) {
+        if (!HasDecodableAudioTrack(source)) {
+            continue;
+        }
+        {
+            std::scoped_lock lock(audioSelectionMutex_);
+            previousAudio_ = source;
+        }
+        spdlog::info("Selected random main-menu audio for silent video {}: {}",
+            Utf8Path(video.filename()),
+            Utf8Path(source));
+        return source;
+    }
+    spdlog::warn("No decodable dedicated soundtrack was available for {}",
+        Utf8Path(video.filename()));
+    return std::nullopt;
 }
 
 bool VideoPlayer::HasDecodableAudioTrack(
     const std::filesystem::path& path) const
 {
+    struct ProbeResult
+    {
+        std::filesystem::file_time_type modified;
+        std::uintmax_t size{ 0 };
+        bool decodable{ false };
+    };
+    static std::mutex cacheMutex;
+    static std::unordered_map<std::string, ProbeResult> cache;
+
     AVFormatContext* format = nullptr;
     const std::string nativePath = Utf8Path(path);
-    const int opened = avformat_open_input(
-        &format,
-        nativePath.c_str(),
-        nullptr,
-        nullptr);
+    std::error_code fileError;
+    const auto modified = std::filesystem::last_write_time(path, fileError);
+    const bool hasModifiedTime = !fileError;
+    fileError.clear();
+    const auto size = std::filesystem::file_size(path, fileError);
+    const bool metadataValid = hasModifiedTime && !fileError;
+    if (metadataValid) {
+        std::scoped_lock lock(cacheMutex);
+        const auto found = cache.find(nativePath);
+        if (found != cache.end() && found->second.modified == modified &&
+            found->second.size == size) {
+            return found->second.decodable;
+        }
+    }
+
+    const int opened =
+        avformat_open_input(&format, nativePath.c_str(), nullptr, nullptr);
     if (opened < 0 || !format) {
         avformat_close_input(&format);
+        if (metadataValid) {
+            std::scoped_lock lock(cacheMutex);
+            cache[nativePath] = { modified, size, false };
+        }
         return false;
     }
 
-    const int stream = FindAudioStream(format);
-    const bool decodable = stream >= 0 &&
-        avcodec_find_decoder(format->streams[stream]->codecpar->codec_id);
+    if (avformat_find_stream_info(format, nullptr) < 0) {
+        avformat_close_input(&format);
+        if (metadataValid) {
+            std::scoped_lock lock(cacheMutex);
+            cache[nativePath] = { modified, size, false };
+        }
+        return false;
+    }
+    bool decodable = false;
+    for (unsigned int index = 0; index < format->nb_streams; ++index) {
+        const AVStream* stream = format->streams[index];
+        if (!stream || !stream->codecpar ||
+            stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) {
+            continue;
+        }
+        const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
+        AVCodecContext* decoder =
+            codec ? avcodec_alloc_context3(codec) : nullptr;
+        if (!decoder) {
+            continue;
+        }
+        int result = avcodec_parameters_to_context(decoder, stream->codecpar);
+        if (result >= 0) {
+            result = avcodec_open2(decoder, codec, nullptr);
+        }
+        const bool usable = result >= 0 && decoder->sample_rate > 0 &&
+                            decoder->channels > 0;
+        avcodec_free_context(&decoder);
+        if (usable) {
+            decodable = true;
+            break;
+        }
+    }
     avformat_close_input(&format);
+    if (metadataValid) {
+        std::scoped_lock lock(cacheMutex);
+        cache[nativePath] = { modified, size, decodable };
+    }
     return decodable;
 }
 
-void VideoPlayer::SetOriginalAudioPreferred(
-    const bool enabled) noexcept
+void VideoPlayer::SetOriginalAudioPreferred(const bool enabled) noexcept
 {
     originalAudioPreferred_.store(enabled, std::memory_order_release);
 }
@@ -438,8 +308,7 @@ bool VideoPlayer::OriginalAudioPreferred() const noexcept
     return originalAudioPreferred_.load(std::memory_order_acquire);
 }
 
-void VideoPlayer::SetOriginalAudioAudible(
-    const bool enabled) noexcept
+void VideoPlayer::SetOriginalAudioAudible(const bool enabled) noexcept
 {
     originalAudioAudible_.store(enabled, std::memory_order_release);
 }
@@ -452,13 +321,11 @@ bool VideoPlayer::OriginalAudioAudible() const noexcept
 void VideoPlayer::AdjustVolume(const float delta)
 {
     float current = volume_.load(std::memory_order_acquire);
-    while (!volume_.compare_exchange_weak(
-        current,
+    while (!volume_.compare_exchange_weak(current,
         std::clamp(current + delta, 0.0F, 2.0F),
-        std::memory_order_acq_rel)) {}
-    spdlog::info(
-        "Main-menu audio volume set to {:.0f}%",
-        Volume() * 100.0F);
+        std::memory_order_acq_rel)) {
+    }
+    spdlog::info("Main-menu audio volume set to {:.0f}%", Volume() * 100.0F);
 }
 
 float VideoPlayer::Volume() const noexcept
@@ -494,66 +361,26 @@ void VideoPlayer::Worker(std::stop_token stopToken)
             continue;
         }
 
-        std::optional<std::filesystem::path> selected;
+        std::filesystem::path selected;
         {
             std::scoped_lock lock(wakeMutex_);
-            selected = std::move(selectedVideo_);
+            if (selectedVideo_) {
+                selected = std::move(*selectedVideo_);
+            }
             selectedVideo_.reset();
         }
-        if (!selected) {
-            auto videos = FindVideos();
-            if (videos.empty()) {
-                spdlog::error(
-                    "No supported videos found in Data\\MainMenuVideos");
-                continue;
-            }
-            selected = PickVideo(std::move(videos));
+        if (selected.empty()) {
+            continue;
         }
-        spdlog::info(
-            "Main-menu session {} selected video: {}",
+        spdlog::info("Main-menu session {} selected video: {}",
             handledSession,
-            Utf8Path(*selected));
-        DecodeSession(*selected, handledSession, stopToken);
+            Utf8Path(selected));
+        DecodeSession(selected, handledSession, stopToken);
         latestFrame_.store({}, std::memory_order_release);
-    }
-}
-
-std::vector<std::filesystem::path> VideoPlayer::FindVideos() const
-{
-    const auto directory = Config::MainMenuDirectory();
-    const MediaLibrary library(
-        directory,
-        Config::RecursiveMediaScan());
-    auto videos = library.Scan();
-    if (videos.empty() &&
-        directory != std::filesystem::path("Data/MainMenuVideos")) {
-        const MediaLibrary legacyLibrary(
-            "Data/MainMenuVideos",
-            Config::RecursiveMediaScan());
-        videos = legacyLibrary.Scan();
-        if (!videos.empty()) {
-            spdlog::info(
-                "Using legacy Data\\MainMenuVideos directory for "
-                "backward compatibility");
+        for (auto& frame : framePool_) {
+            frame.reset();
         }
     }
-    spdlog::info(
-        "Discovered {} main-menu video{} in {}",
-        videos.size(),
-        videos.size() == 1 ? "" : "s",
-        Utf8Path(directory));
-    return videos;
-}
-
-std::filesystem::path VideoPlayer::PickVideo(
-    std::vector<std::filesystem::path> videos)
-{
-    std::ranges::shuffle(videos, random_);
-    if (videos.size() > 1 && videos.front() == previousVideo_) {
-        std::swap(videos.front(), videos[1]);
-    }
-    previousVideo_ = videos.front();
-    return videos.front();
 }
 
 bool VideoPlayer::SessionActive(const std::uint64_t session) const
@@ -562,12 +389,10 @@ bool VideoPlayer::SessionActive(const std::uint64_t session) const
            session_.load(std::memory_order_acquire) == session;
 }
 
-bool VideoPlayer::OverrideAudioSessionActive(
-    const std::uint64_t session) const
+bool VideoPlayer::OverrideAudioSessionActive(const std::uint64_t session) const
 {
     return overrideAudioActive_.load(std::memory_order_acquire) &&
-           overrideAudioSession_.load(std::memory_order_acquire) ==
-               session;
+           overrideAudioSession_.load(std::memory_order_acquire) == session;
 }
 
 void VideoPlayer::OverrideAudioWorker(std::stop_token stopToken)
@@ -579,16 +404,15 @@ void VideoPlayer::OverrideAudioWorker(std::stop_token stopToken)
         {
             std::unique_lock lock(overrideAudioMutex_);
             overrideAudioCondition_.wait(lock, stopToken, [&] {
-                return overrideAudioSession_.load(
-                           std::memory_order_acquire) != handledSession;
+                return overrideAudioSession_.load(std::memory_order_acquire) !=
+                       handledSession;
             });
         }
         if (stopToken.stop_requested()) {
             return;
         }
 
-        handledSession =
-            overrideAudioSession_.load(std::memory_order_acquire);
+        handledSession = overrideAudioSession_.load(std::memory_order_acquire);
         if (!overrideAudioActive_.load(std::memory_order_acquire)) {
             continue;
         }
@@ -602,15 +426,20 @@ void VideoPlayer::OverrideAudioWorker(std::stop_token stopToken)
             continue;
         }
 
-        spdlog::info(
-            "Starting main-menu override audio: {}",
-            Utf8Path(*path));
-        DecodeAudioSession(*path, handledSession, stopToken, true);
+        spdlog::info("Starting main-menu override audio: {}", Utf8Path(*path));
+        const bool started =
+            DecodeAudioSession(*path, handledSession, stopToken, true);
+        if (!started && OverrideAudioSessionActive(handledSession)) {
+            overrideAudioActive_.store(false, std::memory_order_release);
+            SetOriginalAudioPreferred(true);
+            SetOriginalAudioAudible(true);
+            spdlog::warn("Override audio failed; restored the selected video's "
+                         "audio");
+        }
     }
 }
 
-void VideoPlayer::DecodeAudioSession(
-    const std::filesystem::path& path,
+bool VideoPlayer::DecodeAudioSession(const std::filesystem::path& path,
     const std::uint64_t session,
     std::stop_token stopToken,
     const bool overrideAudio)
@@ -620,19 +449,16 @@ void VideoPlayer::DecodeAudioSession(
     constexpr AVSampleFormat kOutputFormat{ AV_SAMPLE_FMT_S16 };
 
     const auto sessionActive = [&] {
-        return overrideAudio ?
-            OverrideAudioSessionActive(session) :
-            SessionActive(session);
+        return overrideAudio ? OverrideAudioSessionActive(session)
+                             : SessionActive(session);
     };
 
-    while (!overrideAudio &&
-           !stopToken.stop_requested() &&
-           sessionActive() &&
+    while (!overrideAudio && !stopToken.stop_requested() && sessionActive() &&
            !GetLatestFrame()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     if (stopToken.stop_requested() || !sessionActive()) {
-        return;
+        return false;
     }
 
     AVFormatContext* format = nullptr;
@@ -652,77 +478,65 @@ void VideoPlayer::DecodeAudioSession(
     };
 
     const std::string nativePath = Utf8Path(path);
-    int result = avformat_open_input(
-        &format,
-        nativePath.c_str(),
-        nullptr,
-        nullptr);
+    int result =
+        avformat_open_input(&format, nativePath.c_str(), nullptr, nullptr);
     if (result < 0) {
         spdlog::error(
-            "Audio decoder could not open {}: {}",
-            nativePath,
-            AvError(result));
+            "Audio decoder could not open {}: {}", nativePath, AvError(result));
         cleanUp();
-        return;
+        return false;
     }
 
-    int audioStream = FindAudioStream(format);
-    if (audioStream >= 0) {
-        const AVCodecParameters* parameters =
-            format->streams[audioStream]->codecpar;
-        if (parameters->sample_rate <= 0 || parameters->channels <= 0) {
-            result = avformat_find_stream_info(format, nullptr);
-            if (result < 0) {
-                spdlog::error(
-                    "FFmpeg could not probe audio stream metadata in {}: {}",
-                    nativePath,
-                    AvError(result));
-                cleanUp();
-                return;
+    int audioStream = -1;
+    const AVCodec* codec = nullptr;
+    const auto openFirstDecodableAudioStream = [&] {
+        for (unsigned int index = 0; index < format->nb_streams; ++index) {
+            AVStream* stream = format->streams[index];
+            if (!stream || !stream->codecpar ||
+                stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) {
+                continue;
             }
-            audioStream = FindAudioStream(format);
-        }
-    }
-    AVCodec* codec = audioStream >= 0 ?
-        avcodec_find_decoder(
-            format->streams[audioStream]->codecpar->codec_id) :
-        nullptr;
-    if (audioStream < 0 || !codec) {
-        spdlog::info(
-            "Selected main-menu video has no decodable audio stream");
-        cleanUp();
-        return;
-    }
 
-    decoder = avcodec_alloc_context3(codec);
-    if (!decoder) {
-        spdlog::error("FFmpeg could not allocate the audio decoder");
-        cleanUp();
-        return;
-    }
-    result = avcodec_parameters_to_context(
-        decoder,
-        format->streams[audioStream]->codecpar);
-    if (result >= 0) {
-        result = avcodec_open2(decoder, codec, nullptr);
-    }
-    if (result < 0 ||
-        decoder->sample_rate <= 0 ||
-        decoder->channels <= 0) {
-        spdlog::error(
-            "FFmpeg could not initialize audio decoder {}: {}",
-            codec->name,
-            AvError(result));
-        cleanUp();
-        return;
+            const AVCodec* candidate =
+                avcodec_find_decoder(stream->codecpar->codec_id);
+            AVCodecContext* candidateDecoder =
+                candidate ? avcodec_alloc_context3(candidate) : nullptr;
+            if (!candidateDecoder) {
+                continue;
+            }
+            int candidateResult = avcodec_parameters_to_context(
+                candidateDecoder, stream->codecpar);
+            if (candidateResult >= 0) {
+                candidateResult =
+                    avcodec_open2(candidateDecoder, candidate, nullptr);
+            }
+            if (candidateResult >= 0 && candidateDecoder->sample_rate > 0 &&
+                candidateDecoder->channels > 0) {
+                audioStream = static_cast<int>(index);
+                codec = candidate;
+                decoder = candidateDecoder;
+                return true;
+            }
+            avcodec_free_context(&candidateDecoder);
+        }
+        return false;
+    };
+
+    if (!openFirstDecodableAudioStream()) {
+        result = avformat_find_stream_info(format, nullptr);
+        if (result < 0 || !openFirstDecodableAudioStream()) {
+            spdlog::info(
+                "Selected main-menu media has no decodable audio stream");
+            cleanUp();
+            return false;
+        }
     }
 
     const std::int64_t inputLayout =
-        decoder->channel_layout != 0 ?
-            static_cast<std::int64_t>(decoder->channel_layout) :
-            av_get_default_channel_layout(decoder->channels);
-    resampler = swr_alloc_set_opts(
-        nullptr,
+        decoder->channel_layout != 0
+            ? static_cast<std::int64_t>(decoder->channel_layout)
+            : av_get_default_channel_layout(decoder->channels);
+    resampler = swr_alloc_set_opts(nullptr,
         AV_CH_LAYOUT_STEREO,
         kOutputFormat,
         kOutputSampleRate,
@@ -734,7 +548,7 @@ void VideoPlayer::DecodeAudioSession(
     if (!resampler || swr_init(resampler) < 0) {
         spdlog::error("FFmpeg could not initialize audio resampling");
         cleanUp();
-        return;
+        return false;
     }
 
     packet = av_packet_alloc();
@@ -742,33 +556,28 @@ void VideoPlayer::DecodeAudioSession(
     if (!packet || !decoded) {
         spdlog::error("FFmpeg could not allocate audio decoding resources");
         cleanUp();
-        return;
+        return false;
     }
     if (!output.Initialize(kOutputSampleRate, kOutputChannels)) {
         cleanUp();
-        return;
+        return false;
     }
-    output.SetVolume(
-        overrideAudio || OriginalAudioAudible() ?
-            Volume() :
-            0.0F);
+    output.SetVolume(overrideAudio || OriginalAudioAudible() ? Volume() : 0.0F);
 
-    spdlog::info(
-        "Playing audio stream {} with {} decoder: {} Hz, {} channels",
+    spdlog::info("Playing audio stream {} with {} decoder: {} Hz, {} channels",
         audioStream,
         codec->name,
         decoder->sample_rate,
         decoder->channels);
 
     AVStream* stream = format->streams[audioStream];
-    while (!stopToken.stop_requested() && sessionActive()) {
-        if (!PlaybackMayAdvance()) {
+    bool playbackFailed = false;
+    while (!stopToken.stop_requested() && sessionActive() && !playbackFailed) {
+        if (!PlaybackGate::MayAdvance()) {
             output.Pause();
-            while (!stopToken.stop_requested() &&
-                   sessionActive() &&
-                   !PlaybackMayAdvance()) {
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(10));
+            while (!stopToken.stop_requested() && sessionActive() &&
+                   !PlaybackGate::MayAdvance()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
             output.Resume();
             if (stopToken.stop_requested() || !sessionActive()) {
@@ -777,29 +586,23 @@ void VideoPlayer::DecodeAudioSession(
         }
 
         output.SetVolume(
-            overrideAudio || OriginalAudioAudible() ?
-                Volume() :
-                0.0F);
+            overrideAudio || OriginalAudioAudible() ? Volume() : 0.0F);
         result = av_read_frame(format, packet);
         if (result < 0) {
             const std::int64_t seekTarget =
-                stream->start_time == AV_NOPTS_VALUE ?
-                    0 :
-                    stream->start_time;
+                stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
             if (av_seek_frame(
-                    format,
-                    audioStream,
-                    seekTarget,
-                    AVSEEK_FLAG_BACKWARD) < 0) {
-                spdlog::warn(
-                    "Audio reached EOF and could not seek to loop");
+                    format, audioStream, seekTarget, AVSEEK_FLAG_BACKWARD) <
+                0) {
+                spdlog::warn("Audio reached EOF and could not seek to loop");
+                playbackFailed = true;
                 break;
             }
             avcodec_flush_buffers(decoder);
             swr_close(resampler);
             if (swr_init(resampler) < 0) {
-                spdlog::warn(
-                    "Audio resampler could not restart for looping");
+                spdlog::warn("Audio resampler could not restart for looping");
+                playbackFailed = true;
                 break;
             }
             continue;
@@ -816,70 +619,81 @@ void VideoPlayer::DecodeAudioSession(
             continue;
         }
 
-        while (avcodec_receive_frame(decoder, decoded) == 0) {
+        while (
+            !playbackFailed && avcodec_receive_frame(decoder, decoded) == 0) {
             if (stopToken.stop_requested() || !sessionActive()) {
                 break;
             }
-            if (!PlaybackMayAdvance()) {
+            if (!PlaybackGate::MayAdvance()) {
                 output.Pause();
-                while (!stopToken.stop_requested() &&
-                       sessionActive() &&
-                       !PlaybackMayAdvance()) {
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(10));
+                while (!stopToken.stop_requested() && sessionActive() &&
+                       !PlaybackGate::MayAdvance()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
                 output.Resume();
-                if (stopToken.stop_requested() ||
-                    !sessionActive()) {
+                if (stopToken.stop_requested() || !sessionActive()) {
                     break;
                 }
             }
 
             const std::int64_t delayedSamples =
                 swr_get_delay(resampler, decoder->sample_rate);
-            const int outputCapacity = static_cast<int>(av_rescale_rnd(
-                delayedSamples + decoded->nb_samples,
-                kOutputSampleRate,
-                decoder->sample_rate,
-                AV_ROUND_UP));
-            if (outputCapacity <= 0) {
+            const int outputCapacity = static_cast<int>(
+                av_rescale_rnd(delayedSamples + decoded->nb_samples,
+                    kOutputSampleRate,
+                    decoder->sample_rate,
+                    AV_ROUND_UP));
+            constexpr int kMaximumOutputSamples = kOutputSampleRate * 10;
+            if (outputCapacity <= 0 || outputCapacity > kMaximumOutputSamples) {
+                if (outputCapacity > kMaximumOutputSamples) {
+                    spdlog::error(
+                        "Rejected an implausibly large decoded audio frame "
+                        "({} samples)",
+                        outputCapacity);
+                    playbackFailed = true;
+                }
                 av_frame_unref(decoded);
                 continue;
             }
 
-            std::vector<std::uint8_t> samples(
-                static_cast<std::size_t>(outputCapacity) *
-                kOutputChannels *
-                sizeof(std::int16_t));
+            std::vector<std::uint8_t> samples;
+            try {
+                samples.resize(static_cast<std::size_t>(outputCapacity) *
+                               kOutputChannels * sizeof(std::int16_t));
+            } catch (const std::bad_alloc&) {
+                spdlog::error(
+                    "Could not allocate a decoded main-menu audio buffer");
+                av_frame_unref(decoded);
+                playbackFailed = true;
+                break;
+            }
             std::uint8_t* outputPlanes[]{ samples.data() };
-            const int converted = swr_convert(
-                resampler,
+            const int converted = swr_convert(resampler,
                 outputPlanes,
                 outputCapacity,
-                const_cast<const std::uint8_t**>(
-                    decoded->extended_data),
+                const_cast<const std::uint8_t**>(decoded->extended_data),
                 decoded->nb_samples);
             av_frame_unref(decoded);
             if (converted <= 0) {
                 continue;
             }
 
-            samples.resize(
-                static_cast<std::size_t>(converted) *
-                kOutputChannels *
-                sizeof(std::int16_t));
+            samples.resize(static_cast<std::size_t>(converted) *
+                           kOutputChannels * sizeof(std::int16_t));
             if (!output.Submit(std::move(samples))) {
                 spdlog::warn("XAudio2 rejected an audio buffer");
+                playbackFailed = true;
+                break;
             }
         }
     }
 
     spdlog::info("Stopped audio for main-menu session {}", session);
     cleanUp();
+    return !playbackFailed;
 }
 
-bool VideoPlayer::DecodeSession(
-    const std::filesystem::path& path,
+bool VideoPlayer::DecodeSession(const std::filesystem::path& path,
     const std::uint64_t session,
     std::stop_token stopToken)
 {
@@ -898,16 +712,11 @@ bool VideoPlayer::DecodeSession(
     };
 
     const std::string nativePath = Utf8Path(path);
-    int result = avformat_open_input(
-        &format,
-        nativePath.c_str(),
-        nullptr,
-        nullptr);
+    int result =
+        avformat_open_input(&format, nativePath.c_str(), nullptr, nullptr);
     if (result < 0) {
         spdlog::error(
-            "FFmpeg could not open {}: {}",
-            nativePath,
-            AvError(result));
+            "FFmpeg could not open {}: {}", nativePath, AvError(result));
         cleanUp();
         return false;
     }
@@ -916,21 +725,18 @@ bool VideoPlayer::DecodeSession(
     // avformat_find_stream_info would decode packets using FFmpeg's default
     // AV1 decoder before we can select libaom, which can stall game startup.
     const int videoStream = FindVideoStream(format);
-    AVCodec* codec = videoStream >= 0 ?
-        FindDecoder(format->streams[videoStream]->codecpar) :
-        nullptr;
+    const AVCodec* codec =
+        videoStream >= 0 ? FindDecoder(format->streams[videoStream]->codecpar)
+                         : nullptr;
     if (videoStream < 0 || !codec) {
         spdlog::error(
-            "FFmpeg found no decodable video stream in {}",
-            nativePath);
+            "FFmpeg found no decodable video stream in {}", nativePath);
         cleanUp();
         return false;
     }
 
     spdlog::info(
-        "Opening {} decoder for video stream {}",
-        codec->name,
-        videoStream);
+        "Opening {} decoder for video stream {}", codec->name, videoStream);
 
     decoder = avcodec_alloc_context3(codec);
     if (!decoder) {
@@ -940,16 +746,14 @@ bool VideoPlayer::DecodeSession(
     }
 
     result = avcodec_parameters_to_context(
-        decoder,
-        format->streams[videoStream]->codecpar);
+        decoder, format->streams[videoStream]->codecpar);
     if (result >= 0) {
         decoder->thread_count = 4;
         decoder->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
         result = avcodec_open2(decoder, codec, nullptr);
     }
     if (result < 0 || decoder->width <= 0 || decoder->height <= 0) {
-        spdlog::error(
-            "FFmpeg could not initialize decoder {}: {}",
+        spdlog::error("FFmpeg could not initialize decoder {}: {}",
             codec->name,
             AvError(result));
         cleanUp();
@@ -965,16 +769,10 @@ bool VideoPlayer::DecodeSession(
     }
 
     AVStream* stream = format->streams[videoStream];
-    const AVRational guessedRate = av_guess_frame_rate(
-        format,
-        stream,
-        nullptr);
+    const AVRational guessedRate = av_guess_frame_rate(format, stream, nullptr);
     const double framesPerSecond =
-        guessedRate.num > 0 && guessedRate.den > 0 ?
-            av_q2d(guessedRate) :
-            30.0;
-    spdlog::info(
-        "Opened {} decoder: {}x{}, {:.3f} FPS",
+        guessedRate.num > 0 && guessedRate.den > 0 ? av_q2d(guessedRate) : 30.0;
+    spdlog::info("Opened {} decoder: {}x{}, {:.3f} FPS",
         codec->name,
         decoder->width,
         decoder->height,
@@ -992,24 +790,24 @@ bool VideoPlayer::DecodeSession(
 
     std::jthread audioWorker(
         [this, path, session](std::stop_token audioStopToken) {
-            DecodeAudioSession(path, session, audioStopToken, false);
+            (void)DecodeAudioSession(path, session, audioStopToken, false);
         });
 
     std::int64_t firstTimestamp = AV_NOPTS_VALUE;
     std::uint64_t fallbackFrame = 0;
     auto playbackStart = std::chrono::steady_clock::now();
+    int converterWidth = 0;
+    int converterHeight = 0;
+    AVPixelFormat converterPixelFormat = AV_PIX_FMT_NONE;
 
     while (!stopToken.stop_requested() && SessionActive(session)) {
-        if (!PlaybackMayAdvance()) {
+        if (!PlaybackGate::MayAdvance()) {
             const auto pauseStart = std::chrono::steady_clock::now();
-            while (!stopToken.stop_requested() &&
-                   SessionActive(session) &&
-                   !PlaybackMayAdvance()) {
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(10));
+            while (!stopToken.stop_requested() && SessionActive(session) &&
+                   !PlaybackGate::MayAdvance()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            playbackStart +=
-                std::chrono::steady_clock::now() - pauseStart;
+            playbackStart += std::chrono::steady_clock::now() - pauseStart;
             if (stopToken.stop_requested() || !SessionActive(session)) {
                 break;
             }
@@ -1018,14 +816,10 @@ bool VideoPlayer::DecodeSession(
         result = av_read_frame(format, packet);
         if (result < 0) {
             const std::int64_t seekTarget =
-                stream->start_time == AV_NOPTS_VALUE ?
-                    0 :
-                    stream->start_time;
+                stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
             if (av_seek_frame(
-                    format,
-                    videoStream,
-                    seekTarget,
-                    AVSEEK_FLAG_BACKWARD) < 0) {
+                    format, videoStream, seekTarget, AVSEEK_FLAG_BACKWARD) <
+                0) {
                 spdlog::warn("Video reached EOF and could not seek to loop");
                 break;
             }
@@ -1054,18 +848,25 @@ bool VideoPlayer::DecodeSession(
 
             const int decodedWidth = decoded->width;
             const int decodedHeight = decoded->height;
-            if (!ApplyCenterCrop(decoded, outputWidth, outputHeight)) {
-                spdlog::error(
-                    "FFmpeg could not center-crop a decoded frame");
+            if (!VideoScaling::ApplyCenterCrop(
+                    decoded, outputWidth, outputHeight)) {
+                spdlog::error("FFmpeg could not center-crop a decoded frame");
                 cleanUp();
                 return false;
             }
 
+            const auto pixelFormat =
+                static_cast<AVPixelFormat>(decoded->format);
+            if (converter && (converterWidth != decoded->width ||
+                                 converterHeight != decoded->height ||
+                                 converterPixelFormat != pixelFormat)) {
+                sws_freeContext(converter);
+                converter = nullptr;
+                spdlog::info(
+                    "Decoded video format changed; rebuilding the scaler");
+            }
             if (!converter) {
-                const auto pixelFormat =
-                    static_cast<AVPixelFormat>(decoded->format);
-                converter = sws_getContext(
-                    decoded->width,
+                converter = sws_getContext(decoded->width,
                     decoded->height,
                     pixelFormat,
                     static_cast<int>(outputWidth),
@@ -1078,20 +879,22 @@ bool VideoPlayer::DecodeSession(
                 if (!converter) {
                     spdlog::error(
                         "FFmpeg could not convert decoded pixel format {}",
-                        av_get_pix_fmt_name(pixelFormat) ?
-                            av_get_pix_fmt_name(pixelFormat) :
-                            "unknown");
+                        av_get_pix_fmt_name(pixelFormat)
+                            ? av_get_pix_fmt_name(pixelFormat)
+                            : "unknown");
                     cleanUp();
                     return false;
                 }
-                spdlog::info(
-                    "Received first decoded frame: {}x{}, pixel format {}; "
-                    "scaling to {}x{}",
+                converterWidth = decoded->width;
+                converterHeight = decoded->height;
+                converterPixelFormat = pixelFormat;
+                spdlog::info("Preparing decoded frame: {}x{}, pixel format {}; "
+                             "scaling to {}x{}",
                     decodedWidth,
                     decodedHeight,
-                    av_get_pix_fmt_name(pixelFormat) ?
-                        av_get_pix_fmt_name(pixelFormat) :
-                        "unknown",
+                    av_get_pix_fmt_name(pixelFormat)
+                        ? av_get_pix_fmt_name(pixelFormat)
+                        : "unknown",
                     outputWidth,
                     outputHeight);
             }
@@ -1111,20 +914,18 @@ bool VideoPlayer::DecodeSession(
                     av_q2d(stream->time_base);
             }
 
-            const auto due = playbackStart +
-                std::chrono::duration_cast<
-                    std::chrono::steady_clock::duration>(
+            const auto due =
+                playbackStart +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(
                         std::max(0.0, presentationSeconds)));
-            while (!stopToken.stop_requested() &&
-                   SessionActive(session) &&
+            while (!stopToken.stop_requested() && SessionActive(session) &&
                    std::chrono::steady_clock::now() < due) {
-                if (!PlaybackMayAdvance()) {
-                    const auto pauseStart =
-                        std::chrono::steady_clock::now();
+                if (!PlaybackGate::MayAdvance()) {
+                    const auto pauseStart = std::chrono::steady_clock::now();
                     while (!stopToken.stop_requested() &&
                            SessionActive(session) &&
-                           !PlaybackMayAdvance()) {
+                           !PlaybackGate::MayAdvance()) {
                         std::this_thread::sleep_for(
                             std::chrono::milliseconds(10));
                     }
@@ -1132,40 +933,62 @@ bool VideoPlayer::DecodeSession(
                         std::chrono::steady_clock::now() - pauseStart;
                     break;
                 }
-                const auto remaining =
-                    due - std::chrono::steady_clock::now();
-                std::this_thread::sleep_for(
-                    std::min(
-                        remaining,
-                        std::chrono::steady_clock::duration(
-                            std::chrono::milliseconds(5))));
+                const auto remaining = due - std::chrono::steady_clock::now();
+                std::this_thread::sleep_for(std::min(remaining,
+                    std::chrono::steady_clock::duration(
+                        std::chrono::milliseconds(5))));
             }
             if (stopToken.stop_requested() || !SessionActive(session)) {
                 break;
             }
 
-            auto frame = std::make_shared<VideoFrame>();
-            frame->channel = PlaybackChannel::kMainMenu;
+            std::shared_ptr<VideoFrame> frame;
+            for (auto& candidate : framePool_) {
+                if (!candidate) {
+                    try {
+                        candidate = std::make_shared<VideoFrame>();
+                    } catch (const std::bad_alloc&) {
+                        break;
+                    }
+                }
+                if (candidate.use_count() == 1) {
+                    frame = candidate;
+                    break;
+                }
+            }
+            if (!frame) {
+                av_frame_unref(decoded);
+                continue;
+            }
             frame->width = outputWidth;
             frame->height = outputHeight;
             frame->rowPitch = frame->width * 4;
-            frame->pixels.resize(
-                static_cast<std::size_t>(frame->rowPitch) *
-                frame->height);
+            try {
+                frame->pixels.resize(
+                    static_cast<std::size_t>(frame->rowPitch) * frame->height);
+            } catch (const std::bad_alloc&) {
+                spdlog::error(
+                    "Could not allocate a decoded main-menu video frame");
+                av_frame_unref(decoded);
+                cleanUp();
+                return false;
+            }
             std::uint8_t* outputPlanes[4]{
                 frame->pixels.data(), nullptr, nullptr, nullptr
             };
-            int outputStrides[4]{
-                static_cast<int>(frame->rowPitch), 0, 0, 0
-            };
-            sws_scale(
-                converter,
+            int outputStrides[4]{ static_cast<int>(frame->rowPitch), 0, 0, 0 };
+            const int scaled = sws_scale(converter,
                 decoded->data,
                 decoded->linesize,
                 0,
                 decoded->height,
                 outputPlanes,
                 outputStrides);
+            if (scaled <= 0) {
+                spdlog::warn("FFmpeg could not scale a decoded video frame");
+                av_frame_unref(decoded);
+                continue;
+            }
             frame->serial = nextFrameSerial_++;
             latestFrame_.store(std::move(frame), std::memory_order_release);
             av_frame_unref(decoded);

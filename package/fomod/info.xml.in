@@ -4,5 +4,5 @@
   <Author>SulfurNitride</Author>
   <Version>@PROJECT_VERSION@</Version>
   <Website>https://github.com/SulfurNitride/Fallout4-Main-Menu-Video-Player</Website>
-  <Description>Play ordinary videos or native BK2/XWM pairs on Fallout 4's main menu, with optional independently randomized soundtracks. The unfinished holotape, Pip-Boy, terminal, and world-screen player is available as an explicitly experimental FOMOD option.</Description>
+  <Description>Play ordinary videos or native BK2/XWM pairs on Fallout 4's main menu, with optional independently randomized soundtracks. No ESP or ESL is required.</Description>
 </fomod>

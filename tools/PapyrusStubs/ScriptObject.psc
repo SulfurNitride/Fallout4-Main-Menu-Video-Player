@@ -1,1 +1,0 @@
-Scriptname ScriptObject Native

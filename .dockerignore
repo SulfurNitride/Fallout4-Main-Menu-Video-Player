@@ -1,0 +1,4 @@
+*
+!cmake/
+!cmake/tool-wrappers/
+!cmake/tool-wrappers/lib.exe

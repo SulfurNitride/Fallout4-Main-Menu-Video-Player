@@ -25,6 +25,16 @@ namespace
             return bufferFinished_;
         }
 
+        bool Failed() const noexcept
+        {
+            return failed_.load(std::memory_order_acquire);
+        }
+
+        void ResetFailure() noexcept
+        {
+            failed_.store(false, std::memory_order_release);
+        }
+
         std::vector<std::uint8_t>* Own(
             std::vector<std::uint8_t> samples)
         {
@@ -73,6 +83,7 @@ namespace
         void STDMETHODCALLTYPE OnVoiceError(void* context, HRESULT error)
             noexcept override
         {
+            failed_.store(true, std::memory_order_release);
             Release(context);
             spdlog::error(
                 "XAudio2 source voice error: {:08X}",
@@ -82,6 +93,7 @@ namespace
 
     private:
         HANDLE bufferFinished_{ nullptr };
+        std::atomic<bool> failed_{ false };
         std::mutex buffersMutex_;
         std::vector<
             std::unique_ptr<std::vector<std::uint8_t>>> buffers_;
@@ -181,15 +193,13 @@ public:
             sampleRate,
             channels);
         paused_.store(false, std::memory_order_release);
-        channels_ = channels;
         SetVolume(volume_);
-        SetPan(pan_);
         return true;
     }
 
     bool Submit(std::vector<std::uint8_t> samples)
     {
-        if (!sourceVoice_ || samples.empty()) {
+        if (!sourceVoice_ || samples.empty() || callback_.Failed()) {
             return false;
         }
 
@@ -199,7 +209,7 @@ public:
             WaitForSingleObject(
                 callback_.BufferFinishedEvent(),
                 25);
-            if (!sourceVoice_) {
+            if (!sourceVoice_ || callback_.Failed()) {
                 return false;
             }
             sourceVoice_->GetState(
@@ -207,7 +217,13 @@ public:
                 XAUDIO2_VOICE_NOSAMPLESPLAYED);
         }
 
-        auto* ownedSamples = callback_.Own(std::move(samples));
+        std::vector<std::uint8_t>* ownedSamples = nullptr;
+        try {
+            ownedSamples = callback_.Own(std::move(samples));
+        } catch (const std::bad_alloc&) {
+            spdlog::error("Could not retain an XAudio2 sample buffer");
+            return false;
+        }
         XAUDIO2_BUFFER buffer{};
         buffer.AudioBytes =
             static_cast<UINT32>(ownedSamples->size());
@@ -267,46 +283,6 @@ public:
         }
     }
 
-    void SetPan(const float pan)
-    {
-        pan_ = std::clamp(pan, -1.0F, 1.0F);
-        if (!sourceVoice_ || !masteringVoice_ || channels_ != 2) {
-            return;
-        }
-        // Let XAudio route ordinary stereo directly. In particular, Wine's
-        // XAudio implementation can expose a multichannel mastering voice
-        // even for headphones, and overriding its default matrix at center
-        // pan can collapse the right channel.
-        if (std::abs(pan_) < 0.0001F) {
-            return;
-        }
-
-        XAUDIO2_VOICE_DETAILS destinationDetails{};
-        masteringVoice_->GetVoiceDetails(&destinationDetails);
-        if (destinationDetails.InputChannels < 2) {
-            return;
-        }
-
-        const float left = pan_ > 0.0F ? 1.0F - pan_ : 1.0F;
-        const float right = pan_ < 0.0F ? 1.0F + pan_ : 1.0F;
-        std::vector<float> matrix(
-            static_cast<std::size_t>(2) *
-                destinationDetails.InputChannels,
-            0.0F);
-        matrix[0] = left;
-        matrix[destinationDetails.InputChannels + 1] = right;
-        const HRESULT result = sourceVoice_->SetOutputMatrix(
-            masteringVoice_,
-            2,
-            destinationDetails.InputChannels,
-            matrix.data());
-        if (FAILED(result)) {
-            spdlog::warn(
-                "Setting XAudio2 pan matrix failed: {:08X}",
-                static_cast<std::uint32_t>(result));
-        }
-    }
-
     void Reset()
     {
         if (sourceVoice_) {
@@ -316,8 +292,8 @@ public:
             sourceVoice_ = nullptr;
         }
         callback_.Clear();
+        callback_.ResetFailure();
         paused_.store(false, std::memory_order_release);
-        channels_ = 0;
         if (masteringVoice_) {
             masteringVoice_->DestroyVoice();
             masteringVoice_ = nullptr;
@@ -334,9 +310,7 @@ private:
     VoiceCallback callback_;
     bool comInitialized_{ false };
     std::atomic<bool> paused_{ false };
-    std::uint16_t channels_{ 0 };
     float volume_{ 1.0F };
-    float pan_{ 0.0F };
 };
 
 AudioOutput::AudioOutput() :
@@ -370,11 +344,6 @@ void AudioOutput::Resume()
 void AudioOutput::SetVolume(const float volume)
 {
     implementation_->SetVolume(volume);
-}
-
-void AudioOutput::SetPan(const float pan)
-{
-    implementation_->SetPan(pan);
 }
 
 void AudioOutput::Reset()
