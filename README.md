@@ -1,16 +1,10 @@
 # Main Menu Video Player
 
-Main Menu Video Player lets Fallout 4 play your own videos on the main menu and Pip-Boy. Put your videos in the included folders, start the game through F4SE, and the mod handles the rest.
-
-The TV and projector workshop objects are included as disabled previews for future versions.
+Main Menu Video Player lets Fallout 4 play your own videos on the main menu. Put your videos in the included folders, start the game through F4SE, and the mod handles the rest.
 
 ## Requirements
 
 - Fallout 4 Script Extender (F4SE)
-
-The main-menu player does not require an ESP. The optional
-`MMVP_WorldScreens.esp` belongs to the experimental holotape/world-screen
-prototype only.
 
 Choose the FOMOD option matching your game:
 
@@ -18,7 +12,7 @@ Choose the FOMOD option matching your game:
 | --- | --- |
 | OG | 1.10.163 |
 | NG | 1.10.980 or 1.10.984 |
-| AE | 1.11.137, 1.11.159, 1.11.169, 1.11.191, or 1.11.221 |
+| AE | 1.11.137, 1.11.159, 1.11.169, 1.11.191, or 1.11.221 1.11.240 |
 
 Address Library is not required.
 
@@ -26,12 +20,9 @@ Address Library is not required.
 
 1. Install the FOMOD with Mod Organizer 2 or another compatible mod manager.
 2. Choose the option matching your `Fallout4.exe` version.
-3. Choose **Main-menu player only — Recommended** unless you intentionally
-   want to test the unfinished holotape player on a disposable save.
-4. If you select the experimental option, enable `MMVP_WorldScreens.esp`.
-5. Let this mod win any conflict for `Video/MainMenuLoop.bk2`.
-6. Add your videos to the folders listed below.
-7. Launch Fallout 4 through F4SE.
+3. Let this mod win any conflict for `Video/MainMenuLoop.bk2`.
+4. Add your videos to the folders listed below.
+5. Launch Fallout 4 through F4SE.
 
 ## Video folders
 
@@ -39,25 +30,8 @@ Address Library is not required.
 | --- | --- |
 | `Data/MainMenuVideos` | Main-menu videos |
 | `Data/MainMenuAudio` | Optional independent main-menu soundtracks |
-| `Data/MovieVideos` | Experimental Pip-Boy movies |
-| `Data/TVVideos` | Experimental Pip-Boy shows |
-
-The recommended main-menu-only installation creates `MainMenuVideos` and
-`MainMenuAudio`. The experimental FOMOD option additionally creates
-`MovieVideos` and `TVVideos`. Subfolders are supported.
 
 Common formats such as MP4, MKV, AVI, MOV, WebM, WMV, and MPEG are supported. The main-menu folder also supports native Fallout 4 BK2 videos.
-
-## Pip-Boy player
-
-The Pip-Boy/terminal player is an explicitly experimental FOMOD option. It is
-not installed by the recommended main-menu-only choice. The experimental path
-adds the **Main Menu Video Player** holotape through an ESP-FE quest and loads
-the browser/player SWFs through Fallout's holotape-program system.
-
-This prototype is still being tested against custom Pip-Boys, terminals, UI
-mods, and all supported runtimes. Use a test save and include the F4SE log plus
-a crash log when reporting a failure.
 
 ## Main-menu controls
 
@@ -106,10 +80,6 @@ file from `MainMenuAudio` and avoids an immediate repeat. Press N for another
 random soundtrack. Press M to switch between dedicated and original video
 audio when both are available.
 
-## TV and projector previews
-
-The ESP includes workshop records and assets for two televisions, a projector, and a movie screen. They are development previews and are disabled by default. Keep `EnableWorldScreens=0` in the INI for this release.
-
 ## Configuration and logs
 
 Settings are in `Data/F4SE/Plugins/MainMenuVideoPlayer.ini`.
@@ -117,7 +87,5 @@ Settings are in `Data/F4SE/Plugins/MainMenuVideoPlayer.ini`.
 The log is written to `Data/F4SE/Plugins/MainMenuVideoPlayer.log`.
 
 ## Credits
-
-The Pip-Boy render-target work was informed by [Project Holo-Wind](https://github.com/rpgking117/Holo-Wind-Windows). The world assets can be regenerated with [Rust-BSA-BA2-Handler](https://github.com/SulfurNitride/Rust-BSA-BA2-Handler).
 
 Made with help from Codex.
