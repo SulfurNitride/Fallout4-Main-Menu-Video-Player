@@ -20,4 +20,11 @@ namespace VideoLayout
                          std::uint32_t carrierHeight,
                          std::uint32_t presentationWidth,
                          std::uint32_t presentationHeight) noexcept;
+
+    // A carrier must be close to the actual window aspect: fitting video
+    // inside a 16:9 carrier does not change Fallout's 16:9 presentation quad.
+    [[nodiscard]] bool IsCarrierAspectMatch(
+        std::uint32_t carrierWidth, std::uint32_t carrierHeight,
+        std::uint32_t presentationWidth,
+        std::uint32_t presentationHeight) noexcept;
 } // namespace VideoLayout

@@ -41,14 +41,14 @@ volume step, and display time can be changed in:
 
     Data\F4SE\Plugins\MainMenuVideoPlayer.ini
 
-MMVP keeps its packaged black MainMenuLoop.bk2 open as Fallout's stable
-carrier. It detects the Fallout window aspect and positions video inside that
-carrier so Fallout's final screen crop preserves 21:9, 32:9, 16:10, and other
-non-16:9 presentations. Set MatchWindowAspect=0 in the INI if another menu mod
-already performs its own aspect correction. A selected BK2 is opened through
-Fallout's Bink decoder and drawn over the carrier. Tab can therefore switch
-between BK2 and ordinary videos as many times as desired during the same menu
-session.
+When MatchWindowAspect=1, MMVP uses a BK2 from this folder whose aspect ratio
+matches Fallout's window as the stable main-menu carrier. This avoids fitting
+an ultrawide video inside the packaged 16:9 carrier before Fallout fits it
+again. Without a matching BK2, the packaged black MainMenuLoop.bk2 remains the
+fallback, and non-16:9 videos may still appear letterboxed. Set
+MatchWindowAspect=0 if another menu mod already handles aspect correction.
+The selected BK2 is opened separately through Fallout's Bink decoder and
+drawn over the carrier. Tab can still switch between BK2 and ordinary videos.
 
 Bicubic is the default auto-threaded scaling algorithm. Spline36 can be
 selected in MainMenuVideoPlayer.ini for higher-quality zscale resizing at the

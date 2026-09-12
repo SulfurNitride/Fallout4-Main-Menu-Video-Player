@@ -4,6 +4,29 @@
 
 namespace VideoLayout
 {
+    bool IsCarrierAspectMatch(const std::uint32_t carrierWidth,
+        const std::uint32_t carrierHeight,
+        const std::uint32_t presentationWidth,
+        const std::uint32_t presentationHeight) noexcept
+    {
+        if (carrierWidth == 0 || carrierHeight == 0 ||
+            presentationWidth == 0 || presentationHeight == 0) {
+            return false;
+        }
+
+        const auto carrierAspect =
+            static_cast<std::uint64_t>(carrierWidth) * presentationHeight;
+        const auto presentationAspect =
+            static_cast<std::uint64_t>(presentationWidth) * carrierHeight;
+        const auto difference = carrierAspect > presentationAspect
+                                    ? carrierAspect - presentationAspect
+                                    : presentationAspect - carrierAspect;
+        // Accept ordinary 21:9 rounding (for example 2560x1080 on a
+        // 3440x1440 window), but reject a 16:9 carrier on an ultrawide one.
+        return difference <=
+               std::max(carrierAspect, presentationAspect) / 100;
+    }
+
     namespace
     {
         std::uint64_t RoundedDivide(

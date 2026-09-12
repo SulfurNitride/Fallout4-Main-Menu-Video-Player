@@ -39,7 +39,7 @@ Both folders support subfolders.
 
 Common formats such as MP4, MKV, AVI, MOV, WebM, WMV, and MPEG are supported. The main-menu folder also supports native Fallout 4 BK2 videos.
 
-MMVP detects Fallout's window aspect ratio and preserves it while composing video into the native main-menu carrier. This supports 21:9, 32:9, 16:10, and other non-16:9 resolutions without prematurely cropping everything to 16:9. Set `MatchWindowAspect=0` in the INI if another menu mod already performs its own aspect correction.
+When `MatchWindowAspect=1`, MMVP looks for a BK2 in `MainMenuVideos` whose aspect ratio matches Fallout's window and uses it as the stable main-menu carrier. This avoids fitting an ultrawide video inside the packaged 16:9 carrier and then having Fallout fit that carrier again. The packaged carrier remains the fallback when no matching BK2 is available, so non-16:9 MP4/MKV-only setups may still be letterboxed by Fallout. Set `MatchWindowAspect=0` if another menu mod already handles aspect correction.
 
 MMVP uses auto-threaded Bicubic scaling by default when a video does not match the presentation dimensions. Set `ScalingAlgorithm=Spline36` in the INI to opt into higher-quality resizing through FFmpeg's zscale filter. Spline36 has higher temporary CPU and system-memory requirements; all of its scaling resources are released when the main menu closes. Videos fill the detected presentation frame, so only source content outside that final aspect ratio is center-cropped.
 

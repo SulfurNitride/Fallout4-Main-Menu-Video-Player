@@ -17,6 +17,12 @@ namespace
 
 int main()
 {
+    if (!VideoLayout::IsCarrierAspectMatch(3440, 1440, 3440, 1440) ||
+        !VideoLayout::IsCarrierAspectMatch(2560, 1080, 3440, 1440) ||
+        VideoLayout::IsCarrierAspectMatch(3840, 2160, 3440, 1440) ||
+        VideoLayout::IsCarrierAspectMatch(0, 1440, 3440, 1440)) {
+        return 1;
+    }
     if (!Matches(VideoLayout::ComputeAspectFitRect(3840, 2160, 1920, 1080), 0,
                  0, 3840, 2160) ||
         !Matches(VideoLayout::ComputeAspectFitRect(3840, 2160, 3440, 1440), 0,

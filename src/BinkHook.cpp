@@ -393,6 +393,62 @@ namespace BinkHook
                        kMaximumCapturedPixels;
         }
 
+        struct CarrierChoice
+        {
+            void* handle{ nullptr };
+            std::filesystem::path path;
+        };
+
+        CarrierChoice OpenAspectMatchedCarrier(
+            const std::optional<std::filesystem::path>& selected,
+            const InputRouter::ClientSizeSnapshot& client,
+            const std::uint32_t flags)
+        {
+            if (!Config::MatchWindowAspect() || !client.available ||
+                !selected) {
+                return {};
+            }
+
+            std::vector<std::filesystem::path> candidates;
+            if (IsBinkVideo(*selected)) {
+                candidates.push_back(*selected);
+            }
+            auto directory = Config::MainMenuDirectory();
+            auto videos = MainMenuMedia::ScanVideos(
+                directory, Config::RecursiveMediaScan(), true);
+            if (videos.empty() &&
+                directory != std::filesystem::path("Data/MainMenuVideos")) {
+                videos = MainMenuMedia::ScanVideos(
+                    "Data/MainMenuVideos", Config::RecursiveMediaScan(),
+                    true);
+            }
+            for (const auto& video : videos) {
+                if (IsBinkVideo(video) &&
+                    !std::ranges::contains(candidates, video)) {
+                    candidates.push_back(video);
+                }
+            }
+
+            for (const auto& candidate : candidates) {
+                const std::string path = Utf8Path(candidate);
+                void* handle = originalOpen(path.c_str(), flags);
+                if (!handle) {
+                    continue;
+                }
+                const auto* header =
+                    static_cast<const PublicBinkHeader*>(handle);
+                if (ValidBinkDimensions(handle) &&
+                    header->numberOfTracks <= 64 &&
+                    VideoLayout::IsCarrierAspectMatch(
+                        header->width, header->height, client.width,
+                        client.height)) {
+                    return { handle, candidate };
+                }
+                originalClose(handle);
+            }
+            return {};
+        }
+
         std::int32_t ScaledBinkVolume(const std::int32_t sourceVolume) noexcept
         {
             const double multiplier = std::clamp(
@@ -920,7 +976,9 @@ namespace BinkHook
                 handle == mainMenuBink.load(std::memory_order_acquire);
             if (mainMenuCall) {
                 RememberCarrierTrackVolumeLocked(track, volume);
-                originalSetVolume(handle, track, volume);
+                // The carrier is only a presentation surface. Preserve its
+                // audio clock, but never play a second copy of its soundtrack.
+                originalSetVolume(handle, track, 0);
                 ApplyActiveBinkVolumesLocked();
                 return;
             }
@@ -965,6 +1023,8 @@ namespace BinkHook
         void* __stdcall HookedOpen(const char* name, const std::uint32_t flags)
         {
             const bool isMainMenuVideo = IsCarrierPath(name);
+            std::optional<std::filesystem::path> selected;
+            InputRouter::ClientSizeSnapshot client;
             if (isMainMenuVideo && !EngineSettings::Apply()) {
                 spdlog::warn("Could not apply live Fallout settings before "
                              "opening the main-menu Bink");
@@ -976,12 +1036,21 @@ namespace BinkHook
                 // its cached client size before choosing the presentation
                 // layout. Failure simply retains the carrier's aspect.
                 InputRouter::Install();
+                client = InputRouter::GetClientSize();
+                selected = SelectMainMenuVideo(true);
             }
 
             // Fallout keeps this handle for the lifetime of MainMenu.swf. Keep
-            // its packaged loop as a stable carrier and route its playback
-            // calls to whichever BK2 is currently selected.
-            void* handle = originalOpen(name, flags);
+            // one aspect-matched BK2 open as a stable carrier and route its
+            // playback calls to whichever file is currently selected. A
+            // 16:9 carrier cannot fill an ultrawide Fallout presentation quad
+            // merely by changing the rectangle copied inside it.
+            CarrierChoice carrier;
+            if (isMainMenuVideo) {
+                carrier = OpenAspectMatchedCarrier(selected, client, flags);
+            }
+            void* handle = carrier.handle ? carrier.handle
+                                          : originalOpen(name, flags);
             if (!handle && isMainMenuVideo) {
                 EngineSettings::EndMainMenu();
             }
@@ -1006,12 +1075,21 @@ namespace BinkHook
             mainMenuOpenFlags = flags;
             mainMenuWidth.store(width, std::memory_order_release);
             mainMenuHeight.store(height, std::memory_order_release);
-            const auto client = InputRouter::GetClientSize();
             presentationWidth.store(client.available ? client.width : 0,
                                     std::memory_order_release);
             presentationHeight.store(client.available ? client.height : 0,
                                      std::memory_order_release);
             mainMenuBink.store(handle, std::memory_order_release);
+            if (carrier.handle) {
+                // Keep Bink's audio clock alive for this handle, including
+                // when an ordinary video is selected later, while silencing
+                // the carrier's own embedded tracks.
+                for (std::uint32_t index = 0;
+                     index < header->numberOfTracks; ++index) {
+                    originalSetVolume(handle,
+                                      originalGetTrackID(handle, index), 0);
+                }
+            }
             void* staleSecondary = nullptr;
             {
                 std::scoped_lock lock(activeBinkMutex);
@@ -1026,8 +1104,12 @@ namespace BinkHook
             loggedUnsupportedSurface.store(false, std::memory_order_relaxed);
             InputRouter::Install();
             spdlog::info("Opened stable main-menu Bink carrier {} "
-                         "({}x{}, flags {:08X})",
-                         handle, width, height, flags);
+                         "({}x{}, flags {:08X}){}",
+                         handle, width, height, flags,
+                         carrier.handle
+                             ? std::format(" from aspect-matched BK2 {}",
+                                           Utf8Path(carrier.path))
+                             : " from packaged loop");
             const auto content = CurrentContentRect(width, height);
             if (content.x != 0 || content.y != 0 || content.width != width ||
                 content.height != height) {
@@ -1038,7 +1120,6 @@ namespace BinkHook
                     content.width, content.height);
             }
 
-            const auto selected = SelectMainMenuVideo(true);
             if (!selected || !ActivateSelection(*selected)) {
                 if (selected) {
                     spdlog::warn(
