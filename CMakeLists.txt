@@ -197,6 +197,12 @@ target_include_directories(mmvp_scaler_smoke PRIVATE
     "${FFMPEG_INCLUDE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
+if(MSVC)
+    # Both smoke targets compile FrameScaler.cpp without mmvp_core's options.
+    # PCH.h includes fmt, which requires UTF-8 source/execution encodings.
+    target_compile_options(mmvp_decode_smoke PRIVATE /utf-8)
+    target_compile_options(mmvp_scaler_smoke PRIVATE /utf-8)
+endif()
 target_link_libraries(mmvp_scaler_smoke PRIVATE
     ${AVFORMAT_LIBRARY}
     ${AVCODEC_LIBRARY}
