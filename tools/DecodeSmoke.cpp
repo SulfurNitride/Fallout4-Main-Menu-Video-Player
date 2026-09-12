@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <cwchar>
@@ -5,6 +6,7 @@
 #include <vector>
 
 #include "SmokePath.h"
+#include "FrameScaler.h"
 #include "VideoScaling.h"
 
 extern "C"
@@ -12,7 +14,6 @@ extern "C"
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
-#include <libswscale/swscale.h>
 }
 
 namespace
@@ -77,9 +78,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     const AVCodecParameters* parameters = format->streams[stream]->codecpar;
-    const AVCodec* codec = parameters->codec_id == AV_CODEC_ID_AV1 ?
-        avcodec_find_decoder_by_name("libaom-av1") :
-        avcodec_find_decoder(parameters->codec_id);
+    const AVCodec* codec = avcodec_find_decoder(parameters->codec_id);
     if (!codec) {
         std::puts("no decoder");
         avformat_close_input(&format);
@@ -134,56 +133,85 @@ int wmain(int argc, wchar_t** argv)
         avformat_close_input(&format);
         return 9;
     }
+    VideoScaling::EnsureColorMetadata(frame);
 
-    SwsContext* scaler = sws_getContext(frame->width,
-        frame->height,
-        static_cast<AVPixelFormat>(frame->format),
-        static_cast<int>(outputWidth),
-        static_cast<int>(outputHeight),
-        AV_PIX_FMT_BGRA,
-        SWS_BILINEAR,
-        nullptr,
-        nullptr,
-        nullptr);
     const int bufferSize = av_image_get_buffer_size(AV_PIX_FMT_BGRA,
         static_cast<int>(outputWidth),
         static_cast<int>(outputHeight),
         1);
-    if (!scaler || bufferSize <= 0) {
+    if (bufferSize <= 0) {
         std::puts("scaler setup failed");
-        sws_freeContext(scaler);
         av_frame_free(&frame);
         av_packet_free(&packet);
         avcodec_free_context(&decoder);
         avformat_close_input(&format);
         return 10;
     }
-    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(bufferSize));
-    std::uint8_t* outputPlanes[4]{};
-    int outputStrides[4]{};
-    if (av_image_fill_arrays(outputPlanes,
-            outputStrides,
+    constexpr std::uint8_t unwrittenPixel = 0xA5;
+    std::vector<std::uint8_t> pixels(
+        static_cast<std::size_t>(bufferSize), unwrittenPixel);
+    AVFrame outputFrame{};
+    outputFrame.format = AV_PIX_FMT_BGRA;
+    outputFrame.width = static_cast<int>(outputWidth);
+    outputFrame.height = static_cast<int>(outputHeight);
+    outputFrame.color_primaries = frame->color_primaries;
+    outputFrame.color_trc = frame->color_trc;
+    outputFrame.colorspace = AVCOL_SPC_RGB;
+    outputFrame.color_range = AVCOL_RANGE_JPEG;
+    VideoScaling::EnsureColorMetadata(&outputFrame);
+    VideoScaling::FrameScaler scaler;
+    if (av_image_fill_arrays(outputFrame.data,
+            outputFrame.linesize,
             pixels.data(),
             AV_PIX_FMT_BGRA,
             static_cast<int>(outputWidth),
             static_cast<int>(outputHeight),
             1) < 0 ||
-        sws_scale(scaler,
-            frame->data,
-            frame->linesize,
-            0,
-            frame->height,
-            outputPlanes,
-            outputStrides) != static_cast<int>(outputHeight)) {
-        std::puts("scale failed");
-        sws_freeContext(scaler);
+        !scaler.Scale(frame, &outputFrame, ScalingAlgorithm::Spline36) ||
+        scaler.ActiveAlgorithm() != ScalingAlgorithm::Spline36) {
+        std::printf("Spline36 scale failed: %s\n",
+                    scaler.LastError().c_str());
+        scaler.Reset();
         av_frame_free(&frame);
         av_packet_free(&packet);
         avcodec_free_context(&decoder);
         avformat_close_input(&format);
         return 11;
     }
-    sws_freeContext(scaler);
+    if (std::ranges::all_of(pixels,
+            [](std::uint8_t value) { return value == unwrittenPixel; })) {
+        std::puts("Spline36 left the destination buffer untouched");
+        scaler.Reset();
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+        avcodec_free_context(&decoder);
+        avformat_close_input(&format);
+        return 12;
+    }
+
+    std::ranges::fill(pixels, unwrittenPixel);
+    scaler.Reset();
+    if (!scaler.Scale(frame, &outputFrame, ScalingAlgorithm::Bicubic) ||
+        scaler.ActiveAlgorithm() != ScalingAlgorithm::Bicubic) {
+        std::printf("Bicubic scale failed: %s\n", scaler.LastError().c_str());
+        scaler.Reset();
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+        avcodec_free_context(&decoder);
+        avformat_close_input(&format);
+        return 13;
+    }
+    if (std::ranges::all_of(pixels,
+            [](std::uint8_t value) { return value == unwrittenPixel; })) {
+        std::puts("Bicubic left the destination buffer untouched");
+        scaler.Reset();
+        av_frame_free(&frame);
+        av_packet_free(&packet);
+        avcodec_free_context(&decoder);
+        avformat_close_input(&format);
+        return 14;
+    }
+    scaler.Reset();
     std::printf(
         "ok codec=%s decoded=%dx%d target=%ux%u cropped=%dx%d "
         "pixel_format=%d\n",

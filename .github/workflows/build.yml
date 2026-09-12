@@ -7,7 +7,7 @@ on:
   pull_request:
   workflow_dispatch:
   # GitHub evicts Actions caches that have not been accessed for seven days.
-  # Refresh the expensive AOM/FFmpeg binary cache before that can happen.
+  # Refresh the expensive FFmpeg/zimg binary cache before that can happen.
   schedule:
     - cron: "17 8 * * 1,5"
 
@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 env:
-  VCPKG_COMMIT: cc288af760054fa489574bd8e22d05aa8fa01e5c
+  VCPKG_COMMIT: e93e1f6ab41a22fe711b1045dbbac5cbc9db60af
   VCPKG_FEATURE_FLAGS: manifests,binarycaching
 
 jobs:
@@ -33,52 +33,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v7
 
-      - name: Prepare MSYS2 tools for FFmpeg
-        id: msys2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MSYS
-          update: false
-          install: >-
-            diffutils
-            make
-            mingw-w64-x86_64-pkgconf
-            nasm
-            perl
-            pkgconf
-            yasm
-
-      - name: Export MSYS2 location
-        shell: pwsh
-        run: |
-          $msysRoot = "${{ steps.msys2.outputs.msys2-location }}"
-          $pkgConfig = Join-Path $msysRoot "mingw64\bin\pkg-config.exe"
-          if (-not (Test-Path $pkgConfig -PathType Leaf)) {
-            throw "MSYS2 pkg-config was not installed at $pkgConfig"
-          }
-
-          "MMVP_MSYS2_ROOT=$msysRoot" |
-            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "PKG_CONFIG=$pkgConfig" |
-            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: Check out pinned vcpkg
         shell: pwsh
         run: |
           git clone https://github.com/microsoft/vcpkg.git vcpkg
           git -C vcpkg checkout $env:VCPKG_COMMIT
-
-          # vcpkg 2022 pins 7-Zip 21.07, but its original 7-zip.org URL
-          # now returns 404. The official GitHub release has the exact
-          # SHA-512 already recorded by this vcpkg revision.
-          $toolsFile = "vcpkg\scripts\vcpkgTools.xml"
-          $toolsXml = Get-Content $toolsFile -Raw
-          $toolsXml = $toolsXml.Replace(
-            "https://www.7-zip.org/a/7z2107-extra.7z",
-            "https://github.com/ip7z/7zip/releases/download/21.07/7z2107-extra.7z"
-          )
-          Set-Content -Path $toolsFile -Value $toolsXml -NoNewline
-
           .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Restore vcpkg binary cache
@@ -112,8 +71,16 @@ jobs:
         run: |
           cmake --build build\windows-ci `
             --config Release `
-            --target mmvp_decode_smoke mmvp_audio_smoke `
+            --target mmvp_decode_smoke mmvp_audio_smoke mmvp_layout_smoke mmvp_scaler_smoke `
             --parallel
+
+      - name: Run aspect-layout smoke test
+        shell: pwsh
+        run: .\build\windows-ci\Release\mmvp_layout_smoke.exe
+
+      - name: Run scaler smoke test
+        shell: pwsh
+        run: .\build\windows-ci\Release\mmvp_scaler_smoke.exe
 
       - name: Build FOMOD
         shell: pwsh
@@ -143,7 +110,8 @@ jobs:
             "runtime\AE\F4SE\Plugins\MainMenuVideoPlayer.dll",
             "legal\LICENSE",
             "legal\THIRD_PARTY_NOTICES.txt",
-            "legal\licenses\FFmpeg-LGPL-2.1.txt"
+            "legal\licenses\FFmpeg-LGPL-2.1.txt",
+            "legal\licenses\zimg-WTFPL-2.0.txt"
           )
 
           foreach ($relativePath in $required) {

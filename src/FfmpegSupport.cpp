@@ -36,14 +36,6 @@ namespace FfmpegSupport
 
     const AVCodec* FindDecoder(const AVCodecParameters* parameters)
     {
-        // FFmpeg 4.4's native AV1 decoder fails on some 10-bit streams under
-        // Wine. Use the external libaom decoder for AV1 instead.
-        if (parameters->codec_id == AV_CODEC_ID_AV1) {
-            if (const AVCodec* aom =
-                    avcodec_find_decoder_by_name("libaom-av1")) {
-                return aom;
-            }
-        }
         return avcodec_find_decoder(parameters->codec_id);
     }
 } // namespace FfmpegSupport

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "VideoFrame.h"
+#include "VideoLayout.h"
 
 class VideoPlayer
 {
@@ -9,6 +10,7 @@ class VideoPlayer
 
     void OnNativeVideoOpened(std::uint32_t width,
         std::uint32_t height,
+        VideoLayout::OutputRect contentRect,
         std::filesystem::path selectedVideo);
     void OnNativeVideoClosed();
     void StartOverrideAudio(const std::filesystem::path& path);
@@ -28,13 +30,22 @@ class VideoPlayer
     [[nodiscard]] std::shared_ptr<const VideoFrame> GetLatestFrame() const;
 
   private:
+    struct VideoRequest
+    {
+        std::filesystem::path path;
+        std::uint32_t outputWidth{ 0 };
+        std::uint32_t outputHeight{ 0 };
+        VideoLayout::OutputRect contentRect;
+        std::uint64_t session{ 0 };
+    };
+
     VideoPlayer();
     ~VideoPlayer();
     VideoPlayer(const VideoPlayer&) = delete;
     VideoPlayer& operator=(const VideoPlayer&) = delete;
 
     void Worker(std::stop_token stopToken);
-    bool DecodeSession(const std::filesystem::path& path,
+    bool DecodeSession(const VideoRequest& request,
         std::uint64_t session,
         std::stop_token stopToken);
     [[nodiscard]] bool DecodeAudioSession(const std::filesystem::path& path,
@@ -47,7 +58,7 @@ class VideoPlayer
 
     mutable std::mutex wakeMutex_;
     std::condition_variable_any wakeCondition_;
-    std::optional<std::filesystem::path> selectedVideo_;
+    std::optional<VideoRequest> selectedVideo_;
     mutable std::mutex overrideAudioMutex_;
     std::condition_variable_any overrideAudioCondition_;
     std::optional<std::filesystem::path> overrideAudioPath_;
@@ -63,8 +74,6 @@ class VideoPlayer
     std::atomic<bool> originalAudioPreferred_{ true };
     std::atomic<bool> originalAudioAudible_{ true };
     std::atomic<float> volume_{ 1.0F };
-    std::atomic<std::uint32_t> outputWidth_{ 0 };
-    std::atomic<std::uint32_t> outputHeight_{ 0 };
     std::atomic<std::shared_ptr<const VideoFrame>> latestFrame_;
     std::array<std::shared_ptr<VideoFrame>, 3> framePool_;
     std::uint64_t nextFrameSerial_{ 1 };

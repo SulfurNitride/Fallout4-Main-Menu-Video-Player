@@ -5,7 +5,7 @@ set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
 set(CMAKE_C_COMPILER clang-cl)
 set(CMAKE_CXX_COMPILER clang-cl)
 set(CMAKE_LINKER lld-link)
-set(CMAKE_AR llvm-lib)
+set(CMAKE_AR /usr/local/bin/lib.exe)
 set(CMAKE_MT llvm-mt)
 set(CMAKE_RC_COMPILER llvm-rc)
 

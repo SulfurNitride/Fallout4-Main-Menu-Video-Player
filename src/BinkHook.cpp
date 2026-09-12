@@ -1,12 +1,15 @@
 #include "PCH.h"
 
 #include "BinkFrameCompositor.h"
+#include "BinkFrameScaler.h"
 #include "BinkHook.h"
 #include "Config.h"
 #include "EngineSettings.h"
 #include "InputRouter.h"
 #include "MainMenuMedia.h"
+#include "VideoLayout.h"
 #include "VideoPlayer.h"
+#include "VideoScaling.h"
 
 #include <MinHook.h>
 
@@ -17,25 +20,18 @@ namespace BinkHook
         using BinkOpen = void*(__stdcall*)(const char*, std::uint32_t);
         using BinkClose = void(__stdcall*)(void*);
         using BinkPause = std::int32_t(__stdcall*)(void*, std::int32_t);
-        using BinkSetVolume = void(
-            __stdcall*)(void*, std::uint32_t, std::int32_t);
+        using BinkSetVolume = void(__stdcall*)(void*, std::uint32_t,
+                                               std::int32_t);
         using BinkGetTrackID = std::uint32_t(__stdcall*)(void*, std::uint32_t);
         using BinkSetSoundOnOff = std::int32_t(__stdcall*)(void*, std::int32_t);
         using BinkDoFrame = std::int32_t(__stdcall*)(void*);
         using BinkNextFrame = void(__stdcall*)(void*);
         using BinkWait = std::int32_t(__stdcall*)(void*);
         using BinkShouldSkip = std::int32_t(__stdcall*)(void*);
-        using BinkCopyToBufferRect = std::int32_t(__stdcall*)(void*,
-            void*,
-            std::int32_t,
-            std::uint32_t,
-            std::uint32_t,
-            std::uint32_t,
-            std::uint32_t,
-            std::uint32_t,
-            std::uint32_t,
-            std::uint32_t,
-            std::uint32_t);
+        using BinkCopyToBufferRect = std::int32_t(__stdcall*)(
+            void*, void*, std::int32_t, std::uint32_t, std::uint32_t,
+            std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
+            std::uint32_t, std::uint32_t);
 
         struct PublicBinkHeader
         {
@@ -72,10 +68,16 @@ namespace BinkHook
         std::atomic<bool> activeBinkSelection{ false };
         std::atomic<std::shared_ptr<const VideoFrame>> activeBinkFrame;
         std::array<std::shared_ptr<VideoFrame>, 3> activeBinkFramePool;
+        BinkFrameScaler::Scaler activeBinkScaler;
         std::atomic<std::uint64_t> activeBinkFrameSerial{ 1 };
         bool loggedFrameAllocationFailure{ false };
+        bool loggedFrameScalingInfo{ false };
+        bool loggedFrameScalingFailure{ false };
+        bool loggedFrameScalingFallback{ false };
         std::atomic<std::uint32_t> mainMenuWidth{ 0 };
         std::atomic<std::uint32_t> mainMenuHeight{ 0 };
+        std::atomic<std::uint32_t> presentationWidth{ 0 };
+        std::atomic<std::uint32_t> presentationHeight{ 0 };
         std::atomic<std::uint32_t> loggedCopyCalls{ 0 };
         std::atomic<bool> loggedUnsupportedSurface{ false };
         std::atomic<bool> replaceMainMenuVideo{ false };
@@ -98,8 +100,23 @@ namespace BinkHook
         using MainMenuMedia::IsCarrierPath;
         using MainMenuMedia::Utf8Path;
 
-        std::optional<std::filesystem::path> SelectMainMenuVideo(
-            const bool includeBink = true)
+        [[nodiscard]] VideoLayout::OutputRect
+        CurrentContentRect(const std::uint32_t carrierWidth,
+                           const std::uint32_t carrierHeight) noexcept
+        {
+            if (!Config::MatchWindowAspect()) {
+                return VideoLayout::ComputeAspectFitRect(
+                    carrierWidth, carrierHeight, carrierWidth, carrierHeight);
+            }
+
+            return VideoLayout::ComputeAspectFitRect(
+                carrierWidth, carrierHeight,
+                presentationWidth.load(std::memory_order_acquire),
+                presentationHeight.load(std::memory_order_acquire));
+        }
+
+        std::optional<std::filesystem::path>
+        SelectMainMenuVideo(const bool includeBink = true)
         {
             auto directory = Config::MainMenuDirectory();
             auto candidates = MainMenuMedia::ScanVideos(
@@ -132,8 +149,8 @@ namespace BinkHook
 
         void ShowHelp(const std::uint32_t milliseconds)
         {
-            helpVisibleUntil.store(
-                GetTickCount64() + milliseconds, std::memory_order_release);
+            helpVisibleUntil.store(GetTickCount64() + milliseconds,
+                                   std::memory_order_release);
             helpRevision.fetch_add(1, std::memory_order_release);
         }
 
@@ -262,15 +279,10 @@ namespace BinkHook
             }
         }
 
-        void OverlayRectangle(VideoFrame& frame,
-            int left,
-            int top,
-            int right,
-            int bottom,
-            const std::uint8_t blue,
-            const std::uint8_t green,
-            const std::uint8_t red,
-            const std::uint8_t alpha)
+        void OverlayRectangle(VideoFrame& frame, int left, int top, int right,
+                              int bottom, const std::uint8_t blue,
+                              const std::uint8_t green, const std::uint8_t red,
+                              const std::uint8_t alpha)
         {
             left = std::clamp(left, 0, static_cast<int>(frame.width));
             right = std::clamp(right, 0, static_cast<int>(frame.width));
@@ -289,11 +301,8 @@ namespace BinkHook
             }
         }
 
-        void OverlayText(VideoFrame& frame,
-            const int left,
-            const int top,
-            const std::string_view text,
-            const int scale)
+        void OverlayText(VideoFrame& frame, const int left, const int top,
+                         const std::string_view text, const int scale)
         {
             int x = left;
             for (const char character : text) {
@@ -301,15 +310,10 @@ namespace BinkHook
                 for (int row = 0; row < 7; ++row) {
                     for (int column = 0; column < 5; ++column) {
                         if ((glyph[row] & (1U << (4 - column))) != 0) {
-                            OverlayRectangle(frame,
-                                x + column * scale,
-                                top + row * scale,
+                            OverlayRectangle(
+                                frame, x + column * scale, top + row * scale,
                                 x + (column + 1) * scale,
-                                top + (row + 1) * scale,
-                                210,
-                                255,
-                                210,
-                                255);
+                                top + (row + 1) * scale, 210, 255, 210, 255);
                         }
                     }
                 }
@@ -330,21 +334,25 @@ namespace BinkHook
             const std::string status =
                 mainMenuStopped.load(std::memory_order_acquire)
                     ? "PLAYBACK STOPPED"
-                    : std::format(
-                          "NOW PLAYING: {}", selection.filename().string());
-            std::vector<std::string> lines{ status,
+                    : std::format("NOW PLAYING: {}",
+                                  selection.filename().string());
+            std::vector<std::string> lines{
+                status,
                 std::format("{}  NEW RANDOM VIDEO",
-                    VirtualKeyName(Config::MainMenuNextKey())),
+                            VirtualKeyName(Config::MainMenuNextKey())),
                 std::format("{}  STOP VIDEO",
-                    VirtualKeyName(Config::MainMenuStopKey())),
+                            VirtualKeyName(Config::MainMenuStopKey())),
                 std::format("{} / {}  VOLUME",
-                    VirtualKeyName(Config::MainMenuVolumeUpKey()),
-                    VirtualKeyName(Config::MainMenuVolumeDownKey())),
+                            VirtualKeyName(Config::MainMenuVolumeUpKey()),
+                            VirtualKeyName(Config::MainMenuVolumeDownKey())),
                 std::format("VOLUME: {:.0f}%",
-                    VideoPlayer::GetSingleton().Volume() * 100.0F) };
-            lines.push_back(std::format("{}  NEXT SOUNDTRACK",
-                VirtualKeyName(Config::MainMenuNextAudioKey())));
-            lines.push_back(std::format("{}  AUDIO: {}",
+                            VideoPlayer::GetSingleton().Volume() * 100.0F)
+            };
+            lines.push_back(
+                std::format("{}  NEXT SOUNDTRACK",
+                            VirtualKeyName(Config::MainMenuNextAudioKey())));
+            lines.push_back(std::format(
+                "{}  AUDIO: {}",
                 VirtualKeyName(Config::MainMenuToggleOriginalAudioKey()),
                 VideoPlayer::GetSingleton().OriginalAudioAudible()
                     ? "VIDEO"
@@ -363,15 +371,8 @@ namespace BinkHook
             frame.rowPitch = frame.width * 4;
             frame.pixels.assign(
                 static_cast<std::size_t>(frame.rowPitch) * frame.height, 0);
-            OverlayRectangle(frame,
-                0,
-                0,
-                static_cast<int>(frame.width),
-                static_cast<int>(frame.height),
-                0,
-                0,
-                0,
-                255);
+            OverlayRectangle(frame, 0, 0, static_cast<int>(frame.width),
+                             static_cast<int>(frame.height), 0, 0, 0, 255);
             int y = 14;
             for (const auto& line : lines) {
                 OverlayText(frame, 18, y, line, scale);
@@ -395,18 +396,18 @@ namespace BinkHook
         std::int32_t ScaledBinkVolume(const std::int32_t sourceVolume) noexcept
         {
             const double multiplier = std::clamp(
-                static_cast<double>(VideoPlayer::GetSingleton().Volume()),
-                0.0,
+                static_cast<double>(VideoPlayer::GetSingleton().Volume()), 0.0,
                 2.0);
             const double scaled =
                 static_cast<double>(sourceVolume) * multiplier;
-            return static_cast<std::int32_t>(std::clamp(scaled,
+            return static_cast<std::int32_t>(std::clamp(
+                scaled,
                 static_cast<double>(std::numeric_limits<std::int32_t>::min()),
                 static_cast<double>(std::numeric_limits<std::int32_t>::max())));
         }
 
         void RememberCarrierTrackVolumeLocked(const std::uint32_t track,
-            const std::int32_t volume)
+                                              const std::int32_t volume)
         {
             constexpr std::size_t kMaximumRememberedTracks{ 64 };
             const auto existing = carrierTrackVolumes.find(track);
@@ -419,19 +420,18 @@ namespace BinkHook
                     loggedTrackVolumeLimit = true;
                     spdlog::warn("Ignoring excess main-menu Bink audio-track "
                                  "volume calls after {} distinct track IDs",
-                        kMaximumRememberedTracks);
+                                 kMaximumRememberedTracks);
                 }
                 return;
             }
             carrierTrackVolumes.emplace(track, volume);
             spdlog::debug("Observed carrier Bink audio track ID {} at source "
                           "volume {}",
-                track,
-                volume);
+                          track, volume);
         }
 
-        std::int32_t SourceVolumeForSelectedTrackLocked(
-            const std::uint32_t track) noexcept
+        std::int32_t
+        SourceVolumeForSelectedTrackLocked(const std::uint32_t track) noexcept
         {
             if (const auto matching = carrierTrackVolumes.find(track);
                 matching != carrierTrackVolumes.end()) {
@@ -480,8 +480,7 @@ namespace BinkHook
                     tracks += std::to_string(track);
                 }
                 spdlog::info("Selected BK2 exposes {} audio track(s), IDs [{}]",
-                    selectedBinkTrackIds.size(),
-                    tracks);
+                             selectedBinkTrackIds.size(), tracks);
             }
         }
 
@@ -499,9 +498,8 @@ namespace BinkHook
             for (const std::uint32_t track : selectedBinkTrackIds) {
                 const std::int32_t sourceVolume =
                     SourceVolumeForSelectedTrackLocked(track);
-                originalSetVolume(activeBink,
-                    track,
-                    audible ? ScaledBinkVolume(sourceVolume) : 0);
+                originalSetVolume(activeBink, track,
+                                  audible ? ScaledBinkVolume(sourceVolume) : 0);
             }
             if (!selectedBinkTrackIds.empty()) {
                 spdlog::debug(
@@ -523,7 +521,11 @@ namespace BinkHook
             for (auto& frame : activeBinkFramePool) {
                 frame.reset();
             }
+            activeBinkScaler.Reset();
             loggedFrameAllocationFailure = false;
+            loggedFrameScalingInfo = false;
+            loggedFrameScalingFailure = false;
+            loggedFrameScalingFallback = false;
             selectedBinkTrackIds.clear();
             appliedBinkAudioAudible.reset();
             return detached;
@@ -568,7 +570,7 @@ namespace BinkHook
                 if (overrideAudio &&
                     !player.HasDecodableAudioTrack(*overrideAudio)) {
                     spdlog::warn("Ignoring undecodable XWM sidecar: {}",
-                        Utf8Path(*overrideAudio));
+                                 Utf8Path(*overrideAudio));
                     overrideAudio.reset();
                 }
             }
@@ -594,8 +596,7 @@ namespace BinkHook
                     spdlog::warn(
                         "Rejected selected BK2 with invalid audio-track "
                         "count {}: {}",
-                        header->numberOfTracks,
-                        path);
+                        header->numberOfTracks, path);
                     originalClose(selectedBink);
                     return false;
                 }
@@ -614,7 +615,7 @@ namespace BinkHook
                     if (dedicatedAudio) {
                         spdlog::info("Muting embedded BK2 tracks in favor of "
                                      "dedicated soundtrack: {}",
-                            Utf8Path(*overrideAudio));
+                                     Utf8Path(*overrideAudio));
                     } else {
                         spdlog::info(
                             "Muting embedded BK2 tracks in favor of XWM "
@@ -634,10 +635,7 @@ namespace BinkHook
                 }
                 CloseDetachedBink(replaced);
                 spdlog::info("Opened BK2 overlay {} ({}x{}) over carrier {}",
-                    path,
-                    header->width,
-                    header->height,
-                    owner);
+                             path, header->width, header->height, owner);
             } else {
                 if (!overrideAudio &&
                     !player.HasDecodableAudioTrack(selection)) {
@@ -655,6 +653,9 @@ namespace BinkHook
                 player.OnNativeVideoOpened(
                     mainMenuWidth.load(std::memory_order_acquire),
                     mainMenuHeight.load(std::memory_order_acquire),
+                    CurrentContentRect(
+                        mainMenuWidth.load(std::memory_order_acquire),
+                        mainMenuHeight.load(std::memory_order_acquire)),
                     selection);
             }
 
@@ -662,12 +663,12 @@ namespace BinkHook
                 std::scoped_lock lock(selectionMutex);
                 pendingOverrideAudio = overrideAudio;
             }
-            pendingOverrideAudioStart.store(
-                overrideAudio.has_value(), std::memory_order_release);
+            pendingOverrideAudioStart.store(overrideAudio.has_value(),
+                                            std::memory_order_release);
             if (overrideAudio) {
                 spdlog::info("Queued {} main-menu audio override: {}",
-                    dedicatedAudio ? "dedicated" : "sidecar",
-                    Utf8Path(*overrideAudio));
+                             dedicatedAudio ? "dedicated" : "sidecar",
+                             Utf8Path(*overrideAudio));
             }
 
             SetCurrentSelection(selection);
@@ -730,7 +731,7 @@ namespace BinkHook
             ApplySelectedBinkAudioState();
             player.StartOverrideAudio(*selected);
             spdlog::info("Started next dedicated main-menu soundtrack: {}",
-                Utf8Path(*selected));
+                         Utf8Path(*selected));
             return true;
         }
 
@@ -753,6 +754,24 @@ namespace BinkHook
                 return;
             }
             const auto* header = static_cast<const PublicBinkHeader*>(handle);
+            const std::uint32_t outputWidth =
+                mainMenuWidth.load(std::memory_order_acquire);
+            const std::uint32_t outputHeight =
+                mainMenuHeight.load(std::memory_order_acquire);
+            const auto destination =
+                CurrentContentRect(outputWidth, outputHeight);
+            const BinkFrameScaler::CoverCrop crop =
+                BinkFrameScaler::ComputeCoverCrop(header->width, header->height,
+                                                  destination.width,
+                                                  destination.height);
+            if (crop.width == 0 || crop.height == 0 || outputWidth == 0 ||
+                outputHeight == 0 || destination.width == 0 ||
+                destination.height == 0 ||
+                static_cast<std::uint64_t>(outputWidth) * outputHeight >
+                    kMaximumCapturedPixels) {
+                return;
+            }
+
             std::shared_ptr<VideoFrame> frame;
             for (auto& candidate : activeBinkFramePool) {
                 if (!candidate) {
@@ -776,8 +795,8 @@ namespace BinkHook
                 }
                 return;
             }
-            frame->width = header->width;
-            frame->height = header->height;
+            frame->width = outputWidth;
+            frame->height = outputHeight;
             frame->rowPitch = frame->width * 4;
             const auto byteCount =
                 static_cast<std::size_t>(frame->rowPitch) * frame->height;
@@ -793,18 +812,86 @@ namespace BinkHook
                 }
                 return;
             }
+
             constexpr std::uint32_t kCopyAll{ 0x80000000U };
-            originalCopy(handle,
-                frame->pixels.data(),
-                static_cast<std::int32_t>(frame->rowPitch),
-                frame->height,
-                0,
-                0,
-                0,
-                0,
-                frame->width,
-                frame->height,
-                kCopyAll | kSurface32);
+            const bool directCopy = header->width == outputWidth &&
+                                    header->height == outputHeight &&
+                                    destination.x == 0 && destination.y == 0 &&
+                                    destination.width == outputWidth &&
+                                    destination.height == outputHeight;
+
+            if (directCopy) {
+                originalCopy(handle, frame->pixels.data(),
+                             static_cast<std::int32_t>(frame->rowPitch),
+                             frame->height, 0, 0, 0, 0, frame->width,
+                             frame->height, kCopyAll | kSurface32);
+            } else {
+                // A pool is rebuilt whenever the selection changes. Vector
+                // growth initializes the padding to black, and the stable
+                // content rectangle never writes into it afterward.
+                const auto sourceRowPitch =
+                    static_cast<std::size_t>(header->width) * 4;
+                const auto sourceByteCount =
+                    sourceRowPitch * static_cast<std::size_t>(header->height);
+                if (!activeBinkScaler.PrepareSource(header->width,
+                                                    header->height)) {
+                    if (!loggedFrameAllocationFailure) {
+                        loggedFrameAllocationFailure = true;
+                        spdlog::error(
+                            "Could not allocate {} bytes for selected BK2 "
+                            "frame capture scratch",
+                            sourceByteCount);
+                    }
+                    return;
+                }
+
+                originalCopy(handle, activeBinkScaler.SourceData(),
+                             static_cast<std::int32_t>(sourceRowPitch),
+                             header->height, 0, 0, 0, 0, header->width,
+                             header->height, kCopyAll | kSurface32);
+                if (!activeBinkScaler.Scale(crop, destination, *frame)) {
+                    if (!loggedFrameScalingFailure) {
+                        loggedFrameScalingFailure = true;
+                        spdlog::error(
+                            "Could not scale selected BK2 frame "
+                            "({}x{} to {}x{}): {}",
+                            crop.width, crop.height, destination.width,
+                            destination.height, activeBinkScaler.LastError());
+                    }
+                    return;
+                }
+                if (activeBinkScaler.FellBackToBicubic() &&
+                    !loggedFrameScalingFallback) {
+                    loggedFrameScalingFallback = true;
+                    spdlog::warn(
+                        "Spline36 was unavailable for selected BK2; falling "
+                        "back to Bicubic: {}",
+                        activeBinkScaler.LastError());
+                }
+                if (!loggedFrameScalingInfo) {
+                    spdlog::info(
+                        "Selected BK2 {} scaling: original {}x{}, cover crop "
+                        "({}, {}) {}x{}, output {}x{}, content rect ({}, {}) "
+                        "{}x{}{}",
+                        ScalingAlgorithmName(
+                            activeBinkScaler.ActiveAlgorithm()),
+                        header->width, header->height, crop.x, crop.y,
+                        crop.width, crop.height, outputWidth, outputHeight,
+                        destination.x, destination.y, destination.width,
+                        destination.height,
+                        presentationWidth.load(std::memory_order_acquire) !=
+                                    0 &&
+                                presentationHeight.load(
+                                    std::memory_order_acquire) != 0
+                            ? std::format(" for client {}x{}",
+                                          presentationWidth.load(
+                                              std::memory_order_acquire),
+                                          presentationHeight.load(
+                                              std::memory_order_acquire))
+                            : "");
+                    loggedFrameScalingInfo = true;
+                }
+            }
             frame->serial =
                 activeBinkFrameSerial.fetch_add(1, std::memory_order_relaxed);
             activeBinkFrame.store(std::move(frame), std::memory_order_release);
@@ -819,15 +906,14 @@ namespace BinkHook
         }
 
         std::int32_t __stdcall HookedPause(void* handle,
-            const std::int32_t paused)
+                                           const std::int32_t paused)
         {
             std::scoped_lock lock(activeBinkMutex);
             return originalPause(RoutedBinkLocked(handle), paused);
         }
 
-        void __stdcall HookedSetVolume(void* handle,
-            const std::uint32_t track,
-            const std::int32_t volume)
+        void __stdcall HookedSetVolume(void* handle, const std::uint32_t track,
+                                       const std::int32_t volume)
         {
             std::scoped_lock lock(activeBinkMutex);
             const bool mainMenuCall =
@@ -885,6 +971,11 @@ namespace BinkHook
             }
             if (isMainMenuVideo) {
                 EngineSettings::BeginMainMenu();
+                // The native window is the only version-independent display
+                // signal available to this minimal F4SE plugin. Initialize
+                // its cached client size before choosing the presentation
+                // layout. Failure simply retains the carrier's aspect.
+                InputRouter::Install();
             }
 
             // Fallout keeps this handle for the lifetime of MainMenu.swf. Keep
@@ -907,8 +998,7 @@ namespace BinkHook
                 spdlog::warn(
                     "Opened the main-menu Bink, but its public dimensions "
                     "look invalid: {}x{}",
-                    width,
-                    height);
+                    width, height);
                 EngineSettings::EndMainMenu();
                 return handle;
             }
@@ -916,6 +1006,11 @@ namespace BinkHook
             mainMenuOpenFlags = flags;
             mainMenuWidth.store(width, std::memory_order_release);
             mainMenuHeight.store(height, std::memory_order_release);
+            const auto client = InputRouter::GetClientSize();
+            presentationWidth.store(client.available ? client.width : 0,
+                                    std::memory_order_release);
+            presentationHeight.store(client.available ? client.height : 0,
+                                     std::memory_order_release);
             mainMenuBink.store(handle, std::memory_order_release);
             void* staleSecondary = nullptr;
             {
@@ -932,10 +1027,16 @@ namespace BinkHook
             InputRouter::Install();
             spdlog::info("Opened stable main-menu Bink carrier {} "
                          "({}x{}, flags {:08X})",
-                handle,
-                width,
-                height,
-                flags);
+                         handle, width, height, flags);
+            const auto content = CurrentContentRect(width, height);
+            if (content.x != 0 || content.y != 0 || content.width != width ||
+                content.height != height) {
+                spdlog::info(
+                    "Matching Fallout client {}x{} with carrier content "
+                    "rect ({}, {}) {}x{}",
+                    client.width, client.height, content.x, content.y,
+                    content.width, content.height);
+            }
 
             const auto selected = SelectMainMenuVideo(true);
             if (!selected || !ActivateSelection(*selected)) {
@@ -975,10 +1076,12 @@ namespace BinkHook
                 mainMenuOpenFlags = 0;
                 mainMenuWidth.store(0, std::memory_order_release);
                 mainMenuHeight.store(0, std::memory_order_release);
+                presentationWidth.store(0, std::memory_order_release);
+                presentationHeight.store(0, std::memory_order_release);
                 replaceMainMenuVideo.store(false, std::memory_order_release);
                 mainMenuStopped.store(false, std::memory_order_release);
-                pendingOverrideAudioStart.store(
-                    false, std::memory_order_release);
+                pendingOverrideAudioStart.store(false,
+                                                std::memory_order_release);
                 {
                     std::scoped_lock lock(selectionMutex);
                     pendingOverrideAudio.reset();
@@ -992,52 +1095,39 @@ namespace BinkHook
             originalClose(handle);
         }
 
-        void CopyVideoPixels(const VideoFrame& frame,
-            void* destination,
-            const std::int32_t destinationPitch,
-            const std::uint32_t destinationHeight,
-            const std::uint32_t destinationX,
-            const std::uint32_t destinationY,
-            const std::uint32_t sourceX,
-            const std::uint32_t sourceY,
-            const std::uint32_t sourceWidth,
-            const std::uint32_t sourceHeight,
-            const std::uint32_t flags)
+        void CopyVideoPixels(const VideoFrame& frame, void* destination,
+                             const std::int32_t destinationPitch,
+                             const std::uint32_t destinationHeight,
+                             const std::uint32_t destinationX,
+                             const std::uint32_t destinationY,
+                             const std::uint32_t sourceX,
+                             const std::uint32_t sourceY,
+                             const std::uint32_t sourceWidth,
+                             const std::uint32_t sourceHeight,
+                             const std::uint32_t flags)
         {
-            const auto result = BinkFrameCompositor::CopyCoverFrame(frame,
-                destination,
-                destinationPitch,
-                destinationHeight,
-                destinationX,
-                destinationY,
-                sourceX,
-                sourceY,
-                sourceWidth,
-                sourceHeight,
-                mainMenuWidth.load(std::memory_order_acquire),
-                mainMenuHeight.load(std::memory_order_acquire),
-                flags);
+            const auto result = BinkFrameCompositor::CopyCoverFrame(
+                frame, destination, destinationPitch, destinationHeight,
+                destinationX, destinationY, sourceX, sourceY, sourceWidth,
+                sourceHeight, mainMenuWidth.load(std::memory_order_acquire),
+                mainMenuHeight.load(std::memory_order_acquire), flags);
             if (result ==
                 BinkFrameCompositor::CopyResult::kUnsupportedSurface) {
                 if (!loggedUnsupportedSurface.exchange(
                         true, std::memory_order_relaxed)) {
                     spdlog::warn(
                         "Cannot replace Bink surface type {} (flags {:08X})",
-                        flags & kSurfaceMask,
-                        flags);
+                        flags & kSurfaceMask, flags);
                 }
             }
         }
 
-        void BlendHelpOverlay(void* destination,
-            const std::int32_t destinationPitch,
+        void BlendHelpOverlay(
+            void* destination, const std::int32_t destinationPitch,
             const std::uint32_t destinationHeight,
-            const std::uint32_t destinationX,
-            const std::uint32_t destinationY,
-            const std::uint32_t sourceX,
-            const std::uint32_t sourceY,
-            const std::uint32_t sourceWidth,
-            const std::uint32_t sourceHeight,
+            const std::uint32_t destinationX, const std::uint32_t destinationY,
+            const std::uint32_t sourceX, const std::uint32_t sourceY,
+            const std::uint32_t sourceWidth, const std::uint32_t sourceHeight,
             const std::uint32_t flags)
         {
             if (!destination || destinationPitch == 0 ||
@@ -1055,10 +1145,14 @@ namespace BinkHook
             if (outputWidth == 0 || outputHeight == 0) {
                 return;
             }
+            const auto content = CurrentContentRect(outputWidth, outputHeight);
+            if (content.width == 0 || content.height == 0) {
+                return;
+            }
 
             static std::mutex overlayMutex;
             static std::uint64_t cachedRevision = 0;
-            static std::uint32_t cachedOutputWidth = 0;
+            static std::uint32_t cachedContentWidth = 0;
             static bool cachedAudioAudible = false;
             static VideoFrame overlay;
             std::scoped_lock lock(overlayMutex);
@@ -1066,69 +1160,56 @@ namespace BinkHook
             const bool audioAudible =
                 VideoPlayer::GetSingleton().OriginalAudioAudible();
             if (cachedRevision != revision ||
-                cachedOutputWidth != outputWidth ||
+                cachedContentWidth != content.width ||
                 cachedAudioAudible != audioAudible) {
-                overlay = BuildHelpOverlay(outputWidth);
+                overlay = BuildHelpOverlay(content.width);
                 cachedRevision = revision;
-                cachedOutputWidth = outputWidth;
+                cachedContentWidth = content.width;
                 cachedAudioAudible = audioAudible;
             }
             if (overlay.pixels.empty()) {
                 return;
             }
 
-            const std::uint32_t left = std::max(16U, outputWidth / 60U);
-            const std::uint32_t top = std::max(16U, outputHeight / 34U);
-            BinkFrameCompositor::BlendOverlay(overlay,
-                left,
-                top,
-                destination,
-                destinationPitch,
-                destinationHeight,
-                destinationX,
-                destinationY,
-                sourceX,
-                sourceY,
-                sourceWidth,
-                sourceHeight,
-                flags);
+            const std::uint32_t left =
+                content.x + std::max(16U, content.width / 60U);
+            const std::uint32_t top =
+                content.y + std::max(16U, content.height / 34U);
+            BinkFrameCompositor::BlendOverlay(
+                overlay, left, top, destination, destinationPitch,
+                destinationHeight, destinationX, destinationY, sourceX, sourceY,
+                sourceWidth, sourceHeight, flags);
         }
 
-        std::int32_t __stdcall HookedCopy(void* handle,
-            void* destination,
-            const std::int32_t destinationPitch,
-            const std::uint32_t destinationHeight,
-            const std::uint32_t destinationX,
-            const std::uint32_t destinationY,
-            const std::uint32_t sourceX,
-            const std::uint32_t sourceY,
-            const std::uint32_t sourceWidth,
-            const std::uint32_t sourceHeight,
-            const std::uint32_t flags)
+        std::int32_t __stdcall HookedCopy(void* handle, void* destination,
+                                          const std::int32_t destinationPitch,
+                                          const std::uint32_t destinationHeight,
+                                          const std::uint32_t destinationX,
+                                          const std::uint32_t destinationY,
+                                          const std::uint32_t sourceX,
+                                          const std::uint32_t sourceY,
+                                          const std::uint32_t sourceWidth,
+                                          const std::uint32_t sourceHeight,
+                                          const std::uint32_t flags)
         {
             const bool isMainMenu =
                 handle == mainMenuBink.load(std::memory_order_acquire);
             const bool selectedBink =
                 isMainMenu &&
                 activeBinkSelection.load(std::memory_order_acquire);
-            const std::int32_t result = selectedBink ? 0
-                                                     : originalCopy(handle,
-                                                           destination,
-                                                           destinationPitch,
-                                                           destinationHeight,
-                                                           destinationX,
-                                                           destinationY,
-                                                           sourceX,
-                                                           sourceY,
-                                                           sourceWidth,
-                                                           sourceHeight,
-                                                           flags);
+            const std::int32_t result =
+                selectedBink
+                    ? 0
+                    : originalCopy(handle, destination, destinationPitch,
+                                   destinationHeight, destinationX,
+                                   destinationY, sourceX, sourceY, sourceWidth,
+                                   sourceHeight, flags);
 
             if (!isMainMenu) {
                 return result;
             }
-            if (pendingOverrideAudioStart.exchange(
-                    false, std::memory_order_acq_rel)) {
+            if (pendingOverrideAudioStart.exchange(false,
+                                                   std::memory_order_acq_rel)) {
                 std::optional<std::filesystem::path> overrideAudio;
                 {
                     std::scoped_lock lock(selectionMutex);
@@ -1148,17 +1229,9 @@ namespace BinkHook
                         "Main-menu Bink copy #{}: pitch {}, buffer height {}, "
                         "dst ({}, {}), src ({}, {}) {}x{}, surface {}, "
                         "flags {:08X}",
-                        call + 1,
-                        destinationPitch,
-                        destinationHeight,
-                        destinationX,
-                        destinationY,
-                        sourceX,
-                        sourceY,
-                        sourceWidth,
-                        sourceHeight,
-                        flags & kSurfaceMask,
-                        flags);
+                        call + 1, destinationPitch, destinationHeight,
+                        destinationX, destinationY, sourceX, sourceY,
+                        sourceWidth, sourceHeight, flags & kSurfaceMask, flags);
                 }
 
                 const auto frame =
@@ -1166,59 +1239,40 @@ namespace BinkHook
                         ? activeBinkFrame.load(std::memory_order_acquire)
                         : VideoPlayer::GetSingleton().GetLatestFrame();
                 static const VideoFrame blackFrame{ .pixels = { 0, 0, 0, 255 },
-                    .width = 1,
-                    .height = 1,
-                    .rowPitch = 4,
-                    .serial = 0 };
+                                                    .width = 1,
+                                                    .height = 1,
+                                                    .rowPitch = 4,
+                                                    .serial = 0 };
                 CopyVideoPixels(
                     frame && !mainMenuStopped.load(std::memory_order_acquire)
                         ? *frame
                         : blackFrame,
-                    destination,
-                    destinationPitch,
-                    destinationHeight,
-                    destinationX,
-                    destinationY,
-                    sourceX,
-                    sourceY,
-                    sourceWidth,
-                    sourceHeight,
-                    flags);
+                    destination, destinationPitch, destinationHeight,
+                    destinationX, destinationY, sourceX, sourceY, sourceWidth,
+                    sourceHeight, flags);
             }
 
-            BlendHelpOverlay(destination,
-                destinationPitch,
-                destinationHeight,
-                destinationX,
-                destinationY,
-                sourceX,
-                sourceY,
-                sourceWidth,
-                sourceHeight,
-                flags);
+            BlendHelpOverlay(destination, destinationPitch, destinationHeight,
+                             destinationX, destinationY, sourceX, sourceY,
+                             sourceWidth, sourceHeight, flags);
             return result;
         }
 
-        bool CreateHook(HMODULE module,
-            const char* exportName,
-            void* hook,
-            void** original,
-            void*& target,
-            bool& created)
+        bool CreateHook(HMODULE module, const char* exportName, void* hook,
+                        void** original, void*& target, bool& created)
         {
             created = false;
             target =
                 reinterpret_cast<void*>(GetProcAddress(module, exportName));
             if (!target) {
-                spdlog::error(
-                    "Could not locate {} in bink2w64.dll", exportName);
+                spdlog::error("Could not locate {} in bink2w64.dll",
+                              exportName);
                 return false;
             }
             const MH_STATUS result = MH_CreateHook(target, hook, original);
             if (result != MH_OK) {
-                spdlog::error("MH_CreateHook({}) failed: {}",
-                    exportName,
-                    MH_StatusToString(result));
+                spdlog::error("MH_CreateHook({}) failed: {}", exportName,
+                              MH_StatusToString(result));
                 return false;
             }
             created = true;
@@ -1237,8 +1291,7 @@ namespace BinkHook
                         cleanupSucceeded = false;
                         spdlog::error(
                             "MH_DisableHook({}) failed during rollback: {}",
-                            hookTargets[index],
-                            MH_StatusToString(result));
+                            hookTargets[index], MH_StatusToString(result));
                     }
                 }
                 if (hookCreated[index] && !hookEnabled[index]) {
@@ -1249,8 +1302,7 @@ namespace BinkHook
                         cleanupSucceeded = false;
                         spdlog::error(
                             "MH_RemoveHook({}) failed during rollback: {}",
-                            hookTargets[index],
-                            MH_StatusToString(result));
+                            hookTargets[index], MH_StatusToString(result));
                     }
                 }
                 if (!hookCreated[index] && !hookEnabled[index]) {
@@ -1261,7 +1313,7 @@ namespace BinkHook
                 const MH_STATUS result = MH_Uninitialize();
                 if (result != MH_OK && result != MH_ERROR_NOT_INITIALIZED) {
                     spdlog::error("MH_Uninitialize failed during rollback: {}",
-                        MH_StatusToString(result));
+                                  MH_StatusToString(result));
                 }
             } else if (uninitialize && !cleanupSucceeded) {
                 spdlog::error(
@@ -1271,9 +1323,8 @@ namespace BinkHook
         }
     } // namespace
 
-    bool HandleWindowMessage(const UINT message,
-        const WPARAM wParam,
-        const LPARAM lParam)
+    bool HandleWindowMessage(const UINT message, const WPARAM wParam,
+                             const LPARAM lParam)
     {
         if (message != WM_KEYDOWN ||
             !mainMenuBink.load(std::memory_order_acquire)) {
@@ -1293,10 +1344,10 @@ namespace BinkHook
                         "The next-video hotkey found no main-menu media");
                 } else if (ActivateSelection(*selected)) {
                     spdlog::info("Main-menu next hotkey selected {}",
-                        Utf8Path(*selected));
+                                 Utf8Path(*selected));
                 } else {
                     spdlog::warn("The next-video hotkey could not activate {}",
-                        Utf8Path(*selected));
+                                 Utf8Path(*selected));
                 }
             }
             return true;
@@ -1319,7 +1370,9 @@ namespace BinkHook
                         "The next-soundtrack hotkey found no supported "
                         "audio sources");
                 }
-                ShowHelp(3000);
+                if (Config::MainMenuHelpMilliseconds() != 0) {
+                    ShowHelp(3000);
+                }
             }
             return true;
         }
@@ -1335,7 +1388,9 @@ namespace BinkHook
                 } else {
                     RestoreOriginalVideoAudio();
                 }
-                ShowHelp(3000);
+                if (Config::MainMenuHelpMilliseconds() != 0) {
+                    ShowHelp(3000);
+                }
             }
             return true;
         }
@@ -1371,8 +1426,8 @@ namespace BinkHook
 
     bool Install()
     {
-        if (std::ranges::any_of(
-                hookEnabled, [](const bool enabled) { return enabled; })) {
+        if (std::ranges::any_of(hookEnabled,
+                                [](const bool enabled) { return enabled; })) {
             spdlog::info("Native Bink hooks are already installed");
             return true;
         }
@@ -1385,7 +1440,7 @@ namespace BinkHook
         if (initializeResult != MH_OK &&
             initializeResult != MH_ERROR_ALREADY_INITIALIZED) {
             spdlog::error("MH_Initialize failed: {}",
-                MH_StatusToString(initializeResult));
+                          MH_StatusToString(initializeResult));
             return false;
         }
 
@@ -1410,60 +1465,40 @@ namespace BinkHook
             return false;
         }
 
-        if (!CreateHook(bink,
-                "BinkOpen",
-                reinterpret_cast<void*>(&HookedOpen),
-                reinterpret_cast<void**>(&originalOpen),
-                hookTargets[0],
-                hookCreated[0]) ||
-            !CreateHook(bink,
-                "BinkClose",
-                reinterpret_cast<void*>(&HookedClose),
-                reinterpret_cast<void**>(&originalClose),
-                hookTargets[1],
-                hookCreated[1]) ||
-            !CreateHook(bink,
-                "BinkCopyToBufferRect",
-                reinterpret_cast<void*>(&HookedCopy),
-                reinterpret_cast<void**>(&originalCopy),
-                hookTargets[2],
-                hookCreated[2]) ||
-            !CreateHook(bink,
-                "BinkPause",
-                reinterpret_cast<void*>(&HookedPause),
-                reinterpret_cast<void**>(&originalPause),
-                hookTargets[3],
-                hookCreated[3]) ||
-            !CreateHook(bink,
-                "BinkSetVolume",
-                reinterpret_cast<void*>(&HookedSetVolume),
-                reinterpret_cast<void**>(&originalSetVolume),
-                hookTargets[4],
-                hookCreated[4]) ||
-            !CreateHook(bink,
-                "BinkDoFrame",
-                reinterpret_cast<void*>(&HookedDoFrame),
-                reinterpret_cast<void**>(&originalDoFrame),
-                hookTargets[5],
-                hookCreated[5]) ||
-            !CreateHook(bink,
-                "BinkNextFrame",
-                reinterpret_cast<void*>(&HookedNextFrame),
-                reinterpret_cast<void**>(&originalNextFrame),
-                hookTargets[6],
-                hookCreated[6]) ||
-            !CreateHook(bink,
-                "BinkWait",
-                reinterpret_cast<void*>(&HookedWait),
-                reinterpret_cast<void**>(&originalWait),
-                hookTargets[7],
-                hookCreated[7]) ||
-            !CreateHook(bink,
-                "BinkShouldSkip",
-                reinterpret_cast<void*>(&HookedShouldSkip),
-                reinterpret_cast<void**>(&originalShouldSkip),
-                hookTargets[8],
-                hookCreated[8])) {
+        if (!CreateHook(bink, "BinkOpen", reinterpret_cast<void*>(&HookedOpen),
+                        reinterpret_cast<void**>(&originalOpen), hookTargets[0],
+                        hookCreated[0]) ||
+            !CreateHook(bink, "BinkClose",
+                        reinterpret_cast<void*>(&HookedClose),
+                        reinterpret_cast<void**>(&originalClose),
+                        hookTargets[1], hookCreated[1]) ||
+            !CreateHook(bink, "BinkCopyToBufferRect",
+                        reinterpret_cast<void*>(&HookedCopy),
+                        reinterpret_cast<void**>(&originalCopy), hookTargets[2],
+                        hookCreated[2]) ||
+            !CreateHook(bink, "BinkPause",
+                        reinterpret_cast<void*>(&HookedPause),
+                        reinterpret_cast<void**>(&originalPause),
+                        hookTargets[3], hookCreated[3]) ||
+            !CreateHook(bink, "BinkSetVolume",
+                        reinterpret_cast<void*>(&HookedSetVolume),
+                        reinterpret_cast<void**>(&originalSetVolume),
+                        hookTargets[4], hookCreated[4]) ||
+            !CreateHook(bink, "BinkDoFrame",
+                        reinterpret_cast<void*>(&HookedDoFrame),
+                        reinterpret_cast<void**>(&originalDoFrame),
+                        hookTargets[5], hookCreated[5]) ||
+            !CreateHook(bink, "BinkNextFrame",
+                        reinterpret_cast<void*>(&HookedNextFrame),
+                        reinterpret_cast<void**>(&originalNextFrame),
+                        hookTargets[6], hookCreated[6]) ||
+            !CreateHook(bink, "BinkWait", reinterpret_cast<void*>(&HookedWait),
+                        reinterpret_cast<void**>(&originalWait), hookTargets[7],
+                        hookCreated[7]) ||
+            !CreateHook(bink, "BinkShouldSkip",
+                        reinterpret_cast<void*>(&HookedShouldSkip),
+                        reinterpret_cast<void**>(&originalShouldSkip),
+                        hookTargets[8], hookCreated[8])) {
             RollBackHooks(ownsMinHook);
             return false;
         }
@@ -1472,9 +1507,8 @@ namespace BinkHook
             void* target = hookTargets[index];
             const MH_STATUS enableResult = MH_EnableHook(target);
             if (enableResult != MH_OK && enableResult != MH_ERROR_ENABLED) {
-                spdlog::error("MH_EnableHook({}) failed: {}",
-                    target,
-                    MH_StatusToString(enableResult));
+                spdlog::error("MH_EnableHook({}) failed: {}", target,
+                              MH_StatusToString(enableResult));
                 RollBackHooks(ownsMinHook);
                 return false;
             }
@@ -1482,7 +1516,7 @@ namespace BinkHook
         }
 
         spdlog::info("Installed native Bink carrier-overlay hooks from {}",
-            reinterpret_cast<void*>(bink));
+                     reinterpret_cast<void*>(bink));
         return true;
     }
 } // namespace BinkHook

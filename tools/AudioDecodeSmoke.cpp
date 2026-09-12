@@ -81,7 +81,7 @@ int wmain(int argc, wchar_t** argv)
         "ok codec=%s sample_rate=%d channels=%d samples=%d\n",
         codec->name,
         decoder->sample_rate,
-        decoder->channels,
+        decoder->ch_layout.nb_channels,
         frame->nb_samples);
     av_frame_free(&frame);
     av_packet_free(&packet);

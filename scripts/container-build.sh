@@ -15,7 +15,8 @@ cmake \
     -DVCPKG_HOST_TRIPLET=x64-linux
 
 cmake --build /work/build/windows \
-    --target mmvp_decode_smoke mmvp_audio_smoke --parallel
+    --target mmvp_decode_smoke mmvp_audio_smoke mmvp_layout_smoke \
+             mmvp_scaler_smoke mmvp_sws_benchmark --parallel
 
 cmake --build /work/build/windows --target package_mod --parallel
 

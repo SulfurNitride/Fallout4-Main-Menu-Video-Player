@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ScalingAlgorithm.h"
+
 namespace Config
 {
     void Load(HMODULE module);
@@ -7,6 +9,8 @@ namespace Config
     [[nodiscard]] bool KeepPlayingWhenBorderless() noexcept;
     [[nodiscard]] bool MuteVanillaMenuMusic() noexcept;
     [[nodiscard]] bool RecursiveMediaScan() noexcept;
+    [[nodiscard]] bool MatchWindowAspect() noexcept;
+    [[nodiscard]] ScalingAlgorithm ScalerAlgorithm() noexcept;
     [[nodiscard]] std::filesystem::path MainMenuDirectory();
     [[nodiscard]] std::filesystem::path MainMenuAudioDirectory();
     [[nodiscard]] std::uint32_t MainMenuHelpMilliseconds() noexcept;

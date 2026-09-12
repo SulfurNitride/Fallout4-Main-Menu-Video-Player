@@ -8,6 +8,8 @@ namespace
     bool keepPlayingWhenBorderless{ true };
     bool muteVanillaMenuMusic{ true };
     bool recursiveMediaScan{ true };
+    bool matchWindowAspect{ true };
+    ScalingAlgorithm scalerAlgorithm{ ScalingAlgorithm::Bicubic };
     std::filesystem::path mainMenuDirectory{
         "Data/MainMenuVideos"
     };
@@ -99,6 +101,23 @@ namespace
             path.c_str());
         return std::filesystem::path(buffer.data()).lexically_normal();
     }
+
+    ScalingAlgorithm ReadScalingAlgorithm(const std::filesystem::path& path)
+    {
+        std::array<wchar_t, 64> buffer{};
+        GetPrivateProfileStringW(L"Video", L"ScalingAlgorithm", L"Bicubic",
+                                 buffer.data(),
+                                 static_cast<DWORD>(buffer.size()),
+                                 path.c_str());
+        if (_wcsicmp(buffer.data(), L"Spline36") == 0) {
+            return ScalingAlgorithm::Spline36;
+        }
+        if (_wcsicmp(buffer.data(), L"Bicubic") != 0) {
+            spdlog::warn(
+                "Unknown ScalingAlgorithm value; using Bicubic");
+        }
+        return ScalingAlgorithm::Bicubic;
+    }
 }
 
 void Config::Load(const HMODULE module)
@@ -133,6 +152,8 @@ void Config::Load(const HMODULE module)
         path,
         L"RecursiveMediaScan",
         true);
+    matchWindowAspect = ReadBoolean(path, L"MatchWindowAspect", true);
+    scalerAlgorithm = ReadScalingAlgorithm(path);
     mainMenuDirectory = ReadPath(
         path,
         L"MainMenuDirectory",
@@ -167,11 +188,13 @@ void Config::Load(const HMODULE module)
     spdlog::info(
         "Configuration: EnableNativeMainMenuBink={}, "
         "MuteVanillaMenuMusic={}, KeepPlayingWhenBorderless={}, "
-        "RecursiveMediaScan={}",
+        "RecursiveMediaScan={}, MatchWindowAspect={}, ScalingAlgorithm={}",
         enableNativeMainMenuBink,
         muteVanillaMenuMusic,
         keepPlayingWhenBorderless,
-        recursiveMediaScan);
+        recursiveMediaScan,
+        matchWindowAspect,
+        ScalingAlgorithmName(scalerAlgorithm));
     spdlog::info(
         "Media directories: main menu='{}', main-menu audio='{}'",
         mainMenuDirectory.string(),
@@ -208,6 +231,16 @@ bool Config::MuteVanillaMenuMusic() noexcept
 bool Config::RecursiveMediaScan() noexcept
 {
     return recursiveMediaScan;
+}
+
+bool Config::MatchWindowAspect() noexcept
+{
+    return matchWindowAspect;
+}
+
+ScalingAlgorithm Config::ScalerAlgorithm() noexcept
+{
+    return scalerAlgorithm;
 }
 
 std::filesystem::path Config::MainMenuDirectory()

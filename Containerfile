@@ -8,6 +8,7 @@ USER root
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
+        automake \
         curl \
         git \
         nasm \
@@ -18,11 +19,12 @@ RUN apt-get update \
         unzip \
         zip \
     && rm -rf /var/lib/apt/lists/* \
+    && ln -sf "$(automake --print-lib)/ar-lib" /usr/local/bin/ar-lib \
     && ln -sf Version.Lib /usr/share/msvc/sdk/lib/um/x86_64/Version.lib \
     && ln -sf /usr/bin/lld-link /usr/local/bin/link.exe \
     && ln -sf /usr/bin/llvm-rc /usr/local/bin/rc.exe
 
-ARG VCPKG_COMMIT=cc288af760054fa489574bd8e22d05aa8fa01e5c
+ARG VCPKG_COMMIT=e93e1f6ab41a22fe711b1045dbbac5cbc9db60af
 RUN git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg \
     && git -C /opt/vcpkg checkout "${VCPKG_COMMIT}" \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics

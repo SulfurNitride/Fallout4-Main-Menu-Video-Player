@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
     MainMenuVideoPlayer
-    VERSION 0.2.0
+    VERSION 0.2.1
     LANGUAGES CXX RC
 )
 
@@ -25,16 +25,19 @@ find_package(spdlog CONFIG REQUIRED)
 find_path(FFMPEG_INCLUDE_DIR "libavcodec/avcodec.h" REQUIRED)
 find_library(AVFORMAT_LIBRARY NAMES avformat REQUIRED)
 find_library(AVCODEC_LIBRARY NAMES avcodec REQUIRED)
+find_library(AVFILTER_LIBRARY NAMES avfilter REQUIRED)
 find_library(AVUTIL_LIBRARY NAMES avutil REQUIRED)
 find_library(SWRESAMPLE_LIBRARY NAMES swresample REQUIRED)
 find_library(SWSCALE_LIBRARY NAMES swscale REQUIRED)
-find_library(AOM_LIBRARY NAMES aom REQUIRED)
+find_library(ZIMG_LIBRARY NAMES zimg REQUIRED)
 
 set(MMVP_CORE_SOURCES
     src/AudioOutput.cpp
     src/AudioOutput.h
     src/BinkFrameCompositor.cpp
     src/BinkFrameCompositor.h
+    src/BinkFrameScaler.cpp
+    src/BinkFrameScaler.h
     src/BinkHook.cpp
     src/BinkHook.h
     src/Config.cpp
@@ -44,6 +47,8 @@ set(MMVP_CORE_SOURCES
     src/F4SEMinimal.h
     src/FfmpegSupport.cpp
     src/FfmpegSupport.h
+    src/FrameScaler.cpp
+    src/FrameScaler.h
     src/InputRouter.cpp
     src/InputRouter.h
     src/Log.cpp
@@ -54,7 +59,10 @@ set(MMVP_CORE_SOURCES
     src/MediaLibrary.h
     src/PlaybackGate.cpp
     src/PlaybackGate.h
+    src/ScalingAlgorithm.h
     src/VideoFrame.h
+    src/VideoLayout.cpp
+    src/VideoLayout.h
     src/VideoPlayer.cpp
     src/VideoPlayer.h
     src/VideoScaling.cpp
@@ -86,13 +94,16 @@ target_link_libraries(mmvp_core
         minhook::minhook
         ${AVFORMAT_LIBRARY}
         ${AVCODEC_LIBRARY}
+        ${AVFILTER_LIBRARY}
         ${AVUTIL_LIBRARY}
         ${SWRESAMPLE_LIBRARY}
         ${SWSCALE_LIBRARY}
-        ${AOM_LIBRARY}
+        ${ZIMG_LIBRARY}
         bcrypt
+        crypt32
         mfplat
         mfuuid
+        ncrypt
         ole32
         secur32
         strmiids
@@ -155,8 +166,65 @@ add_mmvp_variant(MainMenuVideoPlayerAE MMVP_RUNTIME_AE AE)
 add_executable(mmvp_decode_smoke EXCLUDE_FROM_ALL
     tools/DecodeSmoke.cpp
     tools/SmokePath.h
+    src/FrameScaler.cpp
+    src/FrameScaler.h
+    src/ScalingAlgorithm.h
     src/VideoScaling.cpp
     src/VideoScaling.h
+)
+
+add_executable(mmvp_layout_smoke EXCLUDE_FROM_ALL
+    tools/AspectLayoutSmoke.cpp
+    src/VideoLayout.cpp
+    src/VideoLayout.h
+)
+add_executable(mmvp_sws_benchmark EXCLUDE_FROM_ALL
+    tools/SwsThreadBenchmark.cpp
+)
+add_executable(mmvp_scaler_smoke EXCLUDE_FROM_ALL
+    tools/FrameScalerSmoke.cpp
+    src/FrameScaler.cpp
+    src/FrameScaler.h
+    src/ScalingAlgorithm.h
+    src/VideoScaling.cpp
+    src/VideoScaling.h
+)
+target_include_directories(mmvp_layout_smoke PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_include_directories(mmvp_sws_benchmark PRIVATE "${FFMPEG_INCLUDE_DIR}")
+target_include_directories(mmvp_scaler_smoke PRIVATE
+    "${FFMPEG_INCLUDE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(mmvp_scaler_smoke PRIVATE
+    ${AVFORMAT_LIBRARY}
+    ${AVCODEC_LIBRARY}
+    ${AVFILTER_LIBRARY}
+    ${AVUTIL_LIBRARY}
+    ${SWRESAMPLE_LIBRARY}
+    ${SWSCALE_LIBRARY}
+    ${ZIMG_LIBRARY}
+    bcrypt
+    crypt32
+    mfplat
+    mfuuid
+    ncrypt
+    ole32
+    secur32
+    strmiids
+    user32
+    ws2_32
+)
+target_link_libraries(mmvp_sws_benchmark PRIVATE
+    ${AVUTIL_LIBRARY}
+    ${SWSCALE_LIBRARY}
+    bcrypt
+    crypt32
+    ncrypt
+    secur32
+    user32
+    ws2_32
 )
 target_include_directories(mmvp_decode_smoke PRIVATE
     "${FFMPEG_INCLUDE_DIR}"
@@ -165,13 +233,16 @@ target_include_directories(mmvp_decode_smoke PRIVATE
 target_link_libraries(mmvp_decode_smoke PRIVATE
     ${AVFORMAT_LIBRARY}
     ${AVCODEC_LIBRARY}
+    ${AVFILTER_LIBRARY}
     ${AVUTIL_LIBRARY}
     ${SWRESAMPLE_LIBRARY}
     ${SWSCALE_LIBRARY}
-    ${AOM_LIBRARY}
+    ${ZIMG_LIBRARY}
     bcrypt
+    crypt32
     mfplat
     mfuuid
+    ncrypt
     ole32
     secur32
     strmiids
@@ -189,10 +260,11 @@ target_link_libraries(mmvp_audio_smoke PRIVATE
     ${AVCODEC_LIBRARY}
     ${AVUTIL_LIBRARY}
     ${SWRESAMPLE_LIBRARY}
-    ${AOM_LIBRARY}
     bcrypt
+    crypt32
     mfplat
     mfuuid
+    ncrypt
     ole32
     secur32
     strmiids

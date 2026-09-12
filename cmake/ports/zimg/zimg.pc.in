@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: zimg
+Description: Scaling, colorspace conversion, and dithering library
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lzimg
+Cflags: -I${includedir}
